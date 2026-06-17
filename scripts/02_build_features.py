@@ -3,14 +3,15 @@ Script 02: Build the feature engineering pipeline.
 
 Reads cleaned interim data and produces:
   1. Yield targets (expected yield, anomaly, risk class)
-  2. Weather growing-season features
-  3. Drought growing-season features (optional)
-  4. Final merged modeling panel
+  2. Weather growing-season features     [Prompt 4]
+  3. Drought growing-season features     [later]
+  4. Final merged modeling panel         [Prompt 5]
 
 Usage
 -----
     python scripts/02_build_features.py
     python scripts/02_build_features.py --method rolling --window 5
+    python scripts/02_build_features.py --method trend --min-years 5
 
 Run from the project root directory.
 """
@@ -24,13 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-# TODO: Import feature modules when implemented
-# from cropshield.features.yield_targets import (
-#     clean_yield_dataframe, add_expected_yield_rolling, add_yield_anomaly, add_risk_class
-# )
-# from cropshield.features.weather_features import compute_weather_features
-# from cropshield.features.drought_features import compute_drought_features
-# from cropshield.data.build_county_panel import build_modeling_panel
+from cropshield.features.yield_targets import build_yield_targets
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,39 +40,77 @@ def parse_args() -> argparse.Namespace:
         description="Build CropShield feature engineering pipeline."
     )
     parser.add_argument(
-        "--method",
-        choices=["rolling", "trend"],
-        default="rolling",
+        "--method", choices=["rolling", "trend"], default="rolling",
         help="Expected yield method (default: rolling)",
     )
-    parser.add_argument("--window", type=int, default=5, help="Rolling window size in years")
+    parser.add_argument("--window",    type=int, default=5, help="Rolling window (years)")
+    parser.add_argument("--min-periods", type=int, default=3,
+                        help="Min periods for rolling window")
+    parser.add_argument("--min-years", type=int, default=5,
+                        help="Min years for trend fit")
+    parser.add_argument("--quantile",  type=float, default=0.20,
+                        help="Severe-risk quantile threshold (default: 0.20)")
+    parser.add_argument(
+        "--nass-file", default="data/interim/nass_yield_clean.csv",
+        help="Path to cleaned NASS yield CSV",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     logger.info("=== CropShield: Step 2 — Build Features ===")
-    logger.info("Expected yield method: %s (window=%d)", args.method, args.window)
+    logger.info("Expected yield method: %s | window=%d | quantile=%.2f",
+                args.method, args.window, args.quantile)
 
     # ── 1. Yield targets ─────────────────────────────────────────────────────
-    logger.info("--- Engineering yield targets ---")
-    # TODO: Implement when yield_targets.py is ready (Prompt 3)
-    logger.warning("Yield target engineering not yet implemented. Skipping.")
+    nass_path = Path(args.nass_file)
+    if not nass_path.exists():
+        logger.error(
+            "NASS clean file not found at %s. Run scripts/01_fetch_data.py first.",
+            nass_path,
+        )
+        sys.exit(1)
+
+    import pandas as pd
+    nass_df = pd.read_csv(nass_path)
+    logger.info("Loaded NASS data: %d rows from %s", len(nass_df), nass_path)
+
+    targets_df = build_yield_targets(
+        nass_df,
+        method=args.method,
+        window=args.window,
+        min_periods=args.min_periods,
+        min_years=args.min_years,
+        risk_quantile=args.quantile,
+        output_path="data/interim/yield_targets.csv",
+    )
+
+    # Print summary stats
+    valid = targets_df.dropna(subset=["yield_anomaly"])
+    print("\n── Yield Target Summary ──────────────────────────────")
+    print(f"  Total rows:           {len(targets_df)}")
+    print(f"  Rows with targets:    {len(valid)}")
+    print(f"  Rows without targets: {len(targets_df) - len(valid)}  (insufficient history)")
+    print(f"  Years:                {int(targets_df['year'].min())}–{int(targets_df['year'].max())}")
+    print(f"  Mean yield anomaly:   {valid['yield_anomaly'].mean():.2f} bu/acre")
+    print(f"  Std yield anomaly:    {valid['yield_anomaly'].std():.2f} bu/acre")
+    print(f"  Severe-risk rows:     {int((valid['severe_risk'] == 1).sum())}  "
+          f"({100 * (valid['severe_risk'] == 1).mean():.1f}%)")
+    print()
+    print("Sample rows with targets:")
+    print(valid[["year","state","county","yield_anomaly","yield_anomaly_pct","severe_risk"]]
+          .head(10).to_string(index=False))
+    print()
 
     # ── 2. Weather features ──────────────────────────────────────────────────
-    logger.info("--- Computing weather features ---")
-    # TODO: Implement when weather_features.py is ready (Prompt 4)
-    logger.warning("Weather feature engineering not yet implemented. Skipping.")
+    logger.info("--- NASA POWER weather features not yet implemented (Prompt 4) ---")
 
     # ── 3. Drought features ──────────────────────────────────────────────────
-    logger.info("--- Computing drought features ---")
-    # TODO: Implement when drought_features.py is ready
-    logger.warning("Drought feature engineering not yet implemented. Skipping.")
+    logger.info("--- Drought Monitor features not yet implemented ---")
 
     # ── 4. Build modeling panel ──────────────────────────────────────────────
-    logger.info("--- Assembling modeling panel ---")
-    # TODO: Implement when build_county_panel.py is ready (Prompt 5)
-    logger.warning("Panel assembly not yet implemented. Skipping.")
+    logger.info("--- Panel assembly not yet implemented (Prompt 5) ---")
 
     logger.info("=== Step 2 complete ===")
 
