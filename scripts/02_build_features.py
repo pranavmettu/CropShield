@@ -26,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from cropshield.features.yield_targets import build_yield_targets
+from cropshield.features.weather_features import compute_weather_features, save_weather_features
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,7 +105,17 @@ def main() -> None:
     print()
 
     # ── 2. Weather features ──────────────────────────────────────────────────
-    logger.info("--- NASA POWER weather features not yet implemented (Prompt 4) ---")
+    weather_raw_path = Path("data/raw/weather_daily_raw.csv")
+    if weather_raw_path.exists():
+        logger.info("--- Computing weather features ---")
+        import pandas as _pd
+        daily_df = _pd.read_csv(weather_raw_path, parse_dates=["date"])
+        weather_features = compute_weather_features(daily_df)
+        save_weather_features(weather_features, "data/processed/weather_features.csv")
+        print(f"\nWeather features: {weather_features.shape}")
+        print(weather_features.describe().to_string())
+    else:
+        logger.info("--- Weather raw file not found; run 01_fetch_data.py first ---")
 
     # ── 3. Drought features ──────────────────────────────────────────────────
     logger.info("--- Drought Monitor features not yet implemented ---")

@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from cropshield.data.fetch_nass import fetch_nass_yield
-# from cropshield.data.fetch_power import fetch_power_all_counties   # Prompt 4
+from cropshield.data.fetch_power import fetch_power_all_counties, load_county_centroids
 # from cropshield.data.fetch_drought_monitor import fetch_drought_monitor  # later
 
 logging.basicConfig(
@@ -97,7 +97,29 @@ def main() -> None:
 
     # ── 2. NASA POWER weather ────────────────────────────────────────────────
     if not args.skip_weather:
-        logger.info("--- NASA POWER weather fetcher not yet implemented (Prompt 4) ---")
+        logger.info("--- Fetching NASA POWER weather data ---")
+        try:
+            # Get the county FIPS codes present in the NASS data
+            county_fips_list = df_nass["county_fips"].dropna().unique().tolist()
+            logger.info("Loading centroids for %d counties…", len(county_fips_list))
+            centroids = load_county_centroids(county_fips_list=county_fips_list)
+
+            df_weather = fetch_power_all_counties(
+                county_centroids=centroids,
+                start_year=args.start_year,
+                end_year=args.end_year,
+                output_raw="data/raw/weather_daily_raw.csv",
+            )
+            logger.info(
+                "NASA POWER fetch complete: %d daily rows | %d counties | years %d–%d",
+                len(df_weather),
+                df_weather["county_fips"].nunique(),
+                int(df_weather["year"].min()),
+                int(df_weather["year"].max()),
+            )
+        except Exception as exc:
+            logger.error("NASA POWER fetch failed: %s", exc, exc_info=True)
+            sys.exit(1)
 
     # ── 3. U.S. Drought Monitor ──────────────────────────────────────────────
     if not args.skip_drought:

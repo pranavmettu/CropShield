@@ -10,15 +10,15 @@ April 1 through August 31 of each year.
 
 Feature catalogue
 -----------------
-cumulative_precip      : Total precipitation (mm) over the growing season.
-mean_temp              : Mean daily temperature (°C) over the growing season.
-max_temp               : Maximum single-day temperature (°C).
-extreme_heat_days      : Days with Tmax ≥ 35 °C.
-dry_days               : Days with precipitation ≤ 1 mm.
-longest_dry_spell      : Longest consecutive dry-day run (days).
-growing_degree_days    : Sum of max(0, Tavg - base_temp) over the growing season.
-precip_anomaly         : Departure from county's historical mean growing-season
-                         precipitation (mm), using only prior years to avoid leakage.
+cumulative_precip   : Total precipitation (mm) over the growing season.
+mean_temp           : Mean daily temperature (°C) over the growing season.
+max_temp            : Maximum single-day temperature (°C).
+extreme_heat_days   : Days with Tmax ≥ 35 °C.
+dry_days            : Days with precipitation ≤ 1 mm.
+longest_dry_spell   : Longest consecutive dry-day run (days).
+growing_degree_days : Sum of max(0, Tavg - base_temp) over the growing season.
+precip_anomaly      : Departure from county's historical mean growing-season
+                      precipitation, computed from prior years only (leakage-safe).
 """
 
 from __future__ import annotations
@@ -31,14 +31,18 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 GROWING_SEASON_START_MONTH = 4   # April
-GROWING_SEASON_END_MONTH = 8     # August
-GDD_BASE_TEMP_C = 10.0           # Growing degree day base (°C)
-EXTREME_HEAT_THRESHOLD_C = 35.0  # Maximum daily temperature threshold (°C)
-DRY_DAY_THRESHOLD_MM = 1.0       # Daily precipitation threshold for "dry" (mm)
+GROWING_SEASON_END_MONTH   = 8   # August
+GDD_BASE_TEMP_C            = 10.0
+EXTREME_HEAT_THRESHOLD_C   = 35.0
+DRY_DAY_THRESHOLD_MM       = 1.0
 
+GROUP_COLS = ["county_fips", "state_fips", "year"]
+
+
+# ── Season filter ─────────────────────────────────────────────────────────────
 
 def filter_growing_season(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
-    """Keep only rows falling within the growing season window.
+    """Keep only rows that fall within the April–August growing season.
 
     Parameters
     ----------
@@ -52,9 +56,14 @@ def filter_growing_season(df: pd.DataFrame, date_col: str = "date") -> pd.DataFr
     pd.DataFrame
         Filtered DataFrame containing only growing-season rows.
     """
-    # TODO: Parse date_col to datetime, filter month in [4, 5, 6, 7, 8]
-    raise NotImplementedError("filter_growing_season is not yet implemented.")
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col])
+    month = df[date_col].dt.month
+    mask = (month >= GROWING_SEASON_START_MONTH) & (month <= GROWING_SEASON_END_MONTH)
+    return df[mask].reset_index(drop=True)
 
+
+# ── Individual feature functions ──────────────────────────────────────────────
 
 def cumulative_precip(daily: pd.Series) -> float:
     """Return total precipitation (mm) over a growing season."""
@@ -75,7 +84,7 @@ def extreme_heat_days(
     daily_tmax: pd.Series,
     threshold: float = EXTREME_HEAT_THRESHOLD_C,
 ) -> int:
-    """Count days with Tmax above the heat stress threshold."""
+    """Count days with Tmax at or above the heat stress threshold."""
     return int((daily_tmax >= threshold).sum())
 
 
@@ -110,14 +119,19 @@ def longest_dry_spell(
 
     Examples
     --------
-    >>> s = pd.Series([0.0, 0.5, 0.0, 0.0, 5.0, 0.0])
+    >>> s = pd.Series([0.0, 5.0, 0.0, 0.0, 0.0, 5.0])
     >>> longest_dry_spell(s)
-    2
+    3
     """
-    # TODO: Implement consecutive dry-day run detection
-    # Hint: Use (daily_precip <= threshold).astype(int), then detect runs via
-    # cumsum trick or itertools.groupby
-    raise NotImplementedError("longest_dry_spell is not yet implemented.")
+    is_dry = daily_precip <= threshold
+    if not is_dry.any():
+        return 0
+
+    # Group consecutive runs: the group id changes each time is_dry flips
+    group_id = (is_dry != is_dry.shift(fill_value=~is_dry.iloc[0])).cumsum()
+    # Sum is_dry within each group → 0 for wet runs, N for dry runs of length N
+    run_lengths = is_dry.groupby(group_id).sum()
+    return int(run_lengths.max())
 
 
 def growing_degree_days(
@@ -126,7 +140,7 @@ def growing_degree_days(
 ) -> float:
     """Compute accumulated growing degree days (GDD) over a growing season.
 
-    GDD = Σ max(0, Tavg - base_temp)
+    GDD = Σ max(0, Tavg − base_temp)
 
     Parameters
     ----------
@@ -149,64 +163,125 @@ def growing_degree_days(
     return float(np.maximum(0.0, daily_tavg - base_temp).sum())
 
 
-def precip_anomaly_from_history(
-    county_year_df: pd.DataFrame,
-    year: int,
-    precip_col: str = "cumulative_precip",
-    group_cols: list[str] | None = None,
-) -> float:
-    """Compute growing-season precipitation anomaly using only prior-year history.
+# ── Leakage-safe precipitation anomaly ───────────────────────────────────────
+
+def add_precip_anomaly(features_df: pd.DataFrame, precip_col: str = "cumulative_precip") -> pd.DataFrame:
+    """Add a leakage-safe precipitation anomaly column to the county-year features table.
+
+    For each (county_fips, year), the anomaly is:
+        current_year_precip − mean(prior_years_precip)
+
+    Only prior years are used in the baseline mean, preventing leakage.
 
     Parameters
     ----------
-    county_year_df : pd.DataFrame
-        DataFrame of county-level growing-season precip summaries across years.
-        Must contain ``year`` and ``precip_col`` columns.
-    year : int
-        Target year for which the anomaly is computed.
+    features_df : pd.DataFrame
+        County-year features DataFrame with ``county_fips``, ``year``, and
+        a cumulative precipitation column.
     precip_col : str
-        Column name of the cumulative precipitation feature.
-    group_cols : list[str], optional
-        Columns to group by (in addition to year) when computing the baseline.
+        Name of the cumulative precipitation column.
 
     Returns
     -------
-    float
-        Precipitation anomaly (mm) = current_year_precip - historical_mean.
-        Returns NaN if there is insufficient prior history.
+    pd.DataFrame
+        Input DataFrame with an added ``precip_anomaly`` column.
     """
-    # TODO: Implement leakage-safe precip anomaly
-    # Steps:
-    # 1. Filter to prior years only: county_year_df[county_year_df['year'] < year]
-    # 2. Compute mean of precip_col over prior years
-    # 3. Return current - mean (or NaN if no prior data)
-    raise NotImplementedError("precip_anomaly_from_history is not yet implemented.")
+    df = features_df.copy()
+    df = df.sort_values(["county_fips", "year"]).reset_index(drop=True)
 
+    # For each county, rolling mean of prior years via shift(1)
+    df["precip_anomaly"] = (
+        df.groupby("county_fips", group_keys=False)[precip_col]
+        .transform(lambda s: s - s.shift(1).expanding(min_periods=1).mean())
+    )
+    return df
+
+
+# ── Main aggregation pipeline ─────────────────────────────────────────────────
 
 def compute_weather_features(
     daily_df: pd.DataFrame,
     group_cols: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Aggregate daily weather data into county-year growing-season features.
+    """Aggregate daily weather into county-year growing-season features.
 
     Parameters
     ----------
     daily_df : pd.DataFrame
-        Daily weather records with columns: ``county_fips``, ``state``,
+        Daily weather records with columns: ``county_fips``, ``state_fips``,
         ``year``, ``date``, ``PRECTOTCORR``, ``T2M``, ``T2M_MIN``, ``T2M_MAX``.
     group_cols : list[str], optional
-        Columns to group on. Defaults to ``["county_fips", "state", "year"]``.
+        Columns to group on. Defaults to ``["county_fips", "state_fips", "year"]``.
 
     Returns
     -------
     pd.DataFrame
-        One row per (county, year) with all weather features.
+        One row per (county, year) with columns:
+        ``county_fips``, ``state_fips``, ``year``, ``cumulative_precip``,
+        ``mean_temp``, ``max_temp``, ``extreme_heat_days``, ``dry_days``,
+        ``longest_dry_spell``, ``growing_degree_days``, ``precip_anomaly``.
     """
-    # TODO: Implement feature aggregation
-    # Steps:
-    # 1. Filter to growing season via filter_growing_season()
-    # 2. Group by group_cols
-    # 3. For each group, call the individual feature functions
-    # 4. Assemble results into a single wide DataFrame
-    # 5. Add precip_anomaly using precip_anomaly_from_history() (requires second pass)
-    raise NotImplementedError("compute_weather_features is not yet implemented.")
+    grp_cols = group_cols or GROUP_COLS
+
+    # ── 1. Filter to growing season ──────────────────────────────────────────
+    season_df = filter_growing_season(daily_df)
+    logger.info(
+        "compute_weather_features: %d daily rows after growing-season filter",
+        len(season_df),
+    )
+
+    # ── 2. Aggregate per (county, year) ──────────────────────────────────────
+    records = []
+    for keys, grp in season_df.groupby(grp_cols, sort=True):
+        key_dict = dict(zip(grp_cols, keys if isinstance(keys, tuple) else (keys,)))
+
+        precip = grp["PRECTOTCORR"].dropna()
+        tavg   = grp["T2M"].dropna()
+        tmax   = grp["T2M_MAX"].dropna()
+
+        record = {
+            **key_dict,
+            "cumulative_precip":  cumulative_precip(precip),
+            "mean_temp":          mean_temp(tavg),
+            "max_temp":           max_temp(tmax),
+            "extreme_heat_days":  extreme_heat_days(tmax),
+            "dry_days":           dry_days(precip),
+            "longest_dry_spell":  longest_dry_spell(precip),
+            "growing_degree_days": growing_degree_days(tavg),
+            "obs_days":           len(grp),   # diagnostic: how many days had data
+        }
+        records.append(record)
+
+    features = pd.DataFrame(records)
+
+    # ── 3. Add leakage-safe precipitation anomaly ────────────────────────────
+    features = add_precip_anomaly(features)
+
+    logger.info(
+        "compute_weather_features: %d county-year rows | %d counties | years %d–%d",
+        len(features),
+        features["county_fips"].nunique(),
+        int(features["year"].min()),
+        int(features["year"].max()),
+    )
+    return features
+
+
+def save_weather_features(
+    features: pd.DataFrame,
+    output_path: str | Path = "data/processed/weather_features.csv",
+) -> None:
+    """Save the weather features DataFrame to disk.
+
+    Parameters
+    ----------
+    features : pd.DataFrame
+        Output of ``compute_weather_features()``.
+    output_path : str or Path
+        Destination CSV path.
+    """
+    from pathlib import Path as _Path
+    path = _Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    features.to_csv(path, index=False)
+    logger.info("Weather features saved → %s  (%d rows)", path, len(features))
