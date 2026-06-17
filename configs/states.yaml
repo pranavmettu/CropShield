@@ -1,0 +1,58 @@
+# ── State Reference Data ──────────────────────────────────────────────────────
+# FIPS codes, NASS state abbreviations, and centroid coordinates.
+# MVP includes Iowa and Illinois only.
+
+mvp_states:
+  - IOWA
+  - ILLINOIS
+
+standout_states:
+  - IOWA
+  - ILLINOIS
+  - INDIANA
+  - NEBRASKA
+  - KANSAS
+  - NORTH CAROLINA
+
+states:
+  IOWA:
+    fips: "19"
+    nass_abbr: IA
+    nass_full: IOWA
+    centroid_lat: 41.878
+    centroid_lon: -93.098
+
+  ILLINOIS:
+    fips: "17"
+    nass_abbr: IL
+    nass_full: ILLINOIS
+    centroid_lat: 40.633
+    centroid_lon: -89.399
+
+  INDIANA:
+    fips: "18"
+    nass_abbr: IN
+    nass_full: INDIANA
+    centroid_lat: 40.267
+    centroid_lon: -86.135
+
+  NEBRASKA:
+    fips: "31"
+    nass_abbr: NE
+    nass_full: NEBRASKA
+    centroid_lat: 41.492
+    centroid_lon: -99.901
+
+  KANSAS:
+    fips: "20"
+    nass_abbr: KS
+    nass_full: KANSAS
+    centroid_lat: 38.527
+    centroid_lon: -96.727
+
+  NORTH CAROLINA:
+    fips: "37"
+    nass_abbr: NC
+    nass_full: NORTH CAROLINA
+    centroid_lat: 35.630
+    centroid_lon: -79.806

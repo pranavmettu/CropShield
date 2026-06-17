@@ -1,0 +1,66 @@
+You are helping build CropShield, a serious agricultural machine learning portfolio project.
+
+## Project context
+
+CropShield is an interpretable geospatial ML pipeline for drought-aware crop yield-risk
+forecasting using public data (USDA NASS, NASA POWER, U.S. Drought Monitor).
+
+MVP scope: corn only, Iowa + Illinois, 2015 onward.
+Package: src/cropshield/ (src layout, editable install via `pip install -e .`)
+
+## Always prioritise
+
+- Clean, modular Python functions with type hints and docstrings
+- Reproducible data pipelines (raw → interim → processed)
+- Leakage-safe ML: expected yield must use ONLY prior years, never the current year
+- Temporal validation as the primary evaluation strategy (not random splits)
+- Honest scientific limitations in comments, README, and dashboard
+- Readable README documentation updated after each milestone
+- Unit tests for feature engineering and validation logic
+- Informative logging with the `logging` module (not bare `print`)
+
+## Do not
+
+- Create fake results or placeholder metric values
+- Overclaim model usefulness ("production forecast", "guaranteed prediction")
+- Use random train/test split as the main validation result
+- Write one giant notebook instead of modular src/ code
+- Hardcode file paths — use configs/project.yaml or function arguments
+- Introduce deep learning (PyTorch, TensorFlow) before baselines work
+- Silently ignore missing data — always log/report missingness
+- Remove TODO comments without implementing the underlying logic
+- Add trivial comments that just repeat the code ("# loop over years")
+
+## Code style
+
+- Python 3.10+, type hints everywhere
+- Line length: 100 characters
+- Prefer pathlib.Path over os.path
+- Use pandas for tabular data, not manual loops over rows
+- Group imports: stdlib → third-party → local (isort order)
+- Functions should do one thing and be independently testable
+
+## File structure
+
+src/cropshield/
+  data/         ← fetchers (fetch_nass, fetch_power, fetch_drought_monitor, build_county_panel)
+  features/     ← engineering (yield_targets, weather_features, drought_features, panel_features)
+  models/       ← training (train_baseline, train_tree_model, predict)
+  evaluation/   ← metrics, validation_splits, error_analysis
+  interpretability/ ← feature_importance, shap_analysis
+  visualization/    ← plots, maps
+
+scripts/ ← CLI entry points (01_fetch_data.py → 04_evaluate_model.py)
+configs/ ← YAML configs (project.yaml, data_sources.yaml, model_config.yaml, states.yaml)
+tests/   ← pytest unit tests
+
+## Current implementation status
+
+Prompt 1 (scaffold) ✅ — complete
+Prompt 2 (NASS fetcher) 🔲 — next
+Prompt 3 (yield targets) 🔲 — pending
+Prompt 4 (weather features) 🔲 — pending
+Prompt 5 (feature panel) 🔲 — pending
+Prompt 6 (models) 🔲 — pending
+Prompt 7 (interpretability) 🔲 — pending
+Prompt 8 (dashboard) 🔲 — pending

@@ -1,0 +1,85 @@
+# ── CropShield Model Configuration ───────────────────────────────────────────
+
+# ── Task definitions ──────────────────────────────────────────────────────────
+tasks:
+  regression:
+    target_col: yield_anomaly
+    metrics: [rmse, mae, r2]
+  classification:
+    target_col: severe_risk
+    metrics: [precision, recall, f1, auroc]
+
+# ── Validation strategy ───────────────────────────────────────────────────────
+validation:
+  primary: temporal
+  # Hold out the most recent N years for test set
+  temporal_test_years: 3
+  # For spatial split (standout version): hold out one state
+  spatial_holdout_state: null   # e.g. ILLINOIS
+
+# ── Feature groups ────────────────────────────────────────────────────────────
+features:
+  weather:
+    - cumulative_precip
+    - mean_temp
+    - max_temp
+    - extreme_heat_days
+    - dry_days
+    - longest_dry_spell
+    - growing_degree_days
+    - precip_anomaly
+  drought:
+    - d0_max_pct
+    - d1_max_pct
+    - d2_max_pct
+    - d3_max_pct
+    - d4_max_pct
+    - d2_plus_weeks
+  historical:
+    - expected_yield
+    - yield_trend_slope
+  # Optional: soil, crop condition (standout version)
+
+# ── Models ────────────────────────────────────────────────────────────────────
+models:
+  baseline:
+    name: HistoricalMeanBaseline
+    # Predicts county mean yield anomaly from training years (should be ~0)
+
+  random_forest:
+    name: RandomForestRegressor
+    params:
+      n_estimators: 200
+      max_depth: 10
+      min_samples_leaf: 5
+      random_state: 42
+      n_jobs: -1
+
+  xgboost:
+    name: XGBRegressor
+    params:
+      n_estimators: 300
+      learning_rate: 0.05
+      max_depth: 6
+      subsample: 0.8
+      colsample_bytree: 0.8
+      random_state: 42
+      n_jobs: -1
+
+  lightgbm:
+    name: LGBMRegressor
+    params:
+      n_estimators: 300
+      learning_rate: 0.05
+      max_depth: 6
+      num_leaves: 31
+      subsample: 0.8
+      colsample_bytree: 0.8
+      random_state: 42
+      n_jobs: -1
+
+# ── Artifacts ─────────────────────────────────────────────────────────────────
+artifacts:
+  model_dir: models/
+  metrics_file: reports/metrics.json
+  predictions_file: data/processed/predictions.csv

@@ -1,0 +1,50 @@
+# ── CropShield Project Configuration ─────────────────────────────────────────
+# Central config consumed by all pipeline modules.
+# Override values by setting environment variables or passing a custom config path.
+
+project:
+  name: cropshield
+  version: "0.1.0"
+  description: >
+    Drought-aware yield risk forecasting for U.S. corn and soybean counties.
+    Portfolio / research project using public agricultural and climate data.
+
+# ── MVP scope ─────────────────────────────────────────────────────────────────
+scope:
+  crops:
+    - CORN
+  # Expand to SOYBEANS in standout version
+  states:
+    - IOWA
+    - ILLINOIS
+  # Expand to Indiana, Nebraska, Kansas, North Carolina in standout version
+  start_year: 2015
+  end_year: null   # null = use latest fully available year
+
+# ── Growing season window ─────────────────────────────────────────────────────
+growing_season:
+  start_month: 4   # April
+  start_day: 1
+  end_month: 8     # August
+  end_day: 31
+
+# ── Target engineering ────────────────────────────────────────────────────────
+targets:
+  expected_yield_method: rolling   # options: rolling | trend
+  rolling_window: 5                # years of prior history to use
+  trend_min_years: 5               # minimum years for trend fit
+  risk_quantile: 0.20              # bottom 20% = severe risk
+
+# ── Data paths ────────────────────────────────────────────────────────────────
+paths:
+  raw: data/raw
+  interim: data/interim
+  processed: data/processed
+  external: data/external
+  models: models
+  reports: reports
+  figures: reports/figures
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level: INFO

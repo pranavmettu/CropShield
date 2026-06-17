@@ -1,0 +1,60 @@
+# ── CropShield Data Source Configuration ──────────────────────────────────────
+
+# ── USDA NASS Quick Stats ─────────────────────────────────────────────────────
+nass:
+  base_url: "https://quickstats.nass.usda.gov/api/api_GET/"
+  api_key_env: "NASS_API_KEY"   # set in .env
+  commodity_desc: "CORN"
+  statisticcat_desc: "YIELD"
+  unit_desc: "BU / ACRE"
+  agg_level_desc: "COUNTY"
+  sector_desc: "CROPS"
+  group_desc: "FIELD CROPS"
+  domain_desc: "TOTAL"
+  output_file_raw: "data/raw/nass_yield.csv"
+  output_file_clean: "data/interim/nass_yield_clean.csv"
+  required_columns:
+    - year
+    - state_name
+    - county_name
+    - county_ansi
+    - value
+
+# ── NASA POWER API ────────────────────────────────────────────────────────────
+nasa_power:
+  base_url: "https://power.larc.nasa.gov/api/temporal/daily/point"
+  # No API key required as of 2024
+  parameters:
+    - PRECTOTCORR   # precipitation (mm/day)
+    - T2M           # temperature at 2m (C)
+    - T2M_MIN       # min temperature (C)
+    - T2M_MAX       # max temperature (C)
+    - ALLSKY_SFC_SW_DWN  # solar radiation (optional)
+  community: AG       # Agroclimatology community
+  format: JSON
+  output_file_raw: "data/raw/weather_daily_{state}_{year}.csv"
+  output_file_clean: "data/interim/weather_daily.csv"
+  # Retry settings
+  max_retries: 3
+  retry_delay_seconds: 5
+
+# ── U.S. Drought Monitor ──────────────────────────────────────────────────────
+drought_monitor:
+  # County-level tabular statistics endpoint
+  base_url: "https://usdm.climate.unl.edu/DM_Export.ashx"
+  # Alternative: download weekly shapefile archives
+  ftp_archive: "https://droughtmonitor.unl.edu/data/shapefiles/county/"
+  drought_categories:
+    - D0  # Abnormally Dry
+    - D1  # Moderate Drought
+    - D2  # Severe Drought
+    - D3  # Extreme Drought
+    - D4  # Exceptional Drought
+  output_file_raw: "data/raw/drought_monitor.csv"
+  output_file_clean: "data/interim/drought_features.csv"
+
+# ── County FIPS reference ──────────────────────────────────────────────────────
+fips:
+  # Census Bureau county FIPS codes with centroid lat/lon
+  url: "https://raw.githubusercontent.com/btskinner/spatial/master/data/county_centers.csv"
+  output_file: "data/external/county_fips.csv"
