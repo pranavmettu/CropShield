@@ -272,11 +272,12 @@ def fetch_power_all_counties(
 
     # ── Resume from checkpoint if it exists ──────────────────────────────────
     completed_fips: set[str] = set()
-    existing_frames: list[pd.DataFrame] = []
+    # all_data accumulates ALL fetched frames in memory for correct checkpointing
+    all_data: list[pd.DataFrame] = []
     if checkpoint_path.exists():
         ckpt = pd.read_csv(checkpoint_path, low_memory=False)
         completed_fips = set(ckpt["county_fips"].unique())
-        existing_frames.append(ckpt)
+        all_data.append(ckpt)
         logger.info(
             "Resuming from checkpoint: %d counties already fetched",
             len(completed_fips),
@@ -289,7 +290,6 @@ def fetch_power_all_counties(
         total, len(remaining), len(completed_fips),
     )
 
-    batch: list[pd.DataFrame] = []
     fetched_this_run = 0
 
     for i, row in enumerate(remaining.itertuples(index=False), start=1):
@@ -312,25 +312,23 @@ def fetch_power_all_counties(
             df_county.insert(0, "county_fips", fips)
             df_county.insert(1, "state_fips",  st_fips)
             df_county.insert(2, "county",      county)
-            batch.append(df_county)
+            all_data.append(df_county)
             fetched_this_run += 1
         except Exception as exc:
             logger.error("Failed to fetch %s (%s): %s — skipping.", fips, county, exc)
 
-        # ── Checkpoint ────────────────────────────────────────────────────────
-        if fetched_this_run % checkpoint_every == 0 and batch:
-            _save_checkpoint(existing_frames, batch, checkpoint_path)
-            batch = []
+        # ── Checkpoint: write cumulative data every N counties ─────────────────
+        if fetched_this_run % checkpoint_every == 0 and fetched_this_run > 0:
+            _save_checkpoint(all_data, [], checkpoint_path)
 
         if request_delay > 0:
             time.sleep(request_delay)
 
     # ── Final save ────────────────────────────────────────────────────────────
-    all_frames = existing_frames + batch
-    if not all_frames:
+    if not all_data:
         raise ValueError("No weather data was fetched successfully.")
 
-    result = pd.concat(all_frames, ignore_index=True)
+    result = pd.concat(all_data, ignore_index=True)
     output_raw.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_raw, index=False)
     logger.info(
@@ -348,12 +346,12 @@ def fetch_power_all_counties(
 
 
 def _save_checkpoint(
-    existing: list[pd.DataFrame],
-    batch: list[pd.DataFrame],
+    all_data: list[pd.DataFrame],
+    _unused: list,
     path: Path,
 ) -> None:
-    """Append the current batch to the checkpoint CSV."""
-    combined = pd.concat(existing + batch, ignore_index=True)
+    """Write all accumulated data to the checkpoint CSV."""
+    combined = pd.concat(all_data, ignore_index=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(path, index=False)
     n_counties = combined["county_fips"].nunique()

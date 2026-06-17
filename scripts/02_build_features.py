@@ -1,17 +1,17 @@
 """
 Script 02: Build the feature engineering pipeline.
 
-Reads cleaned interim data and produces:
+Orchestrates:
   1. Yield targets (expected yield, anomaly, risk class)
-  2. Weather growing-season features     [Prompt 4]
-  3. Drought growing-season features     [later]
-  4. Final merged modeling panel         [Prompt 5]
+  2. Weather growing-season features (if raw weather data is available)
+  3. Drought growing-season features (placeholder)
+  4. Final merged modeling panel
 
 Usage
 -----
     python scripts/02_build_features.py
-    python scripts/02_build_features.py --method rolling --window 5
-    python scripts/02_build_features.py --method trend --min-years 5
+    python scripts/02_build_features.py --method trend --window 5
+    python scripts/02_build_features.py --targets-only   # skip weather merge
 
 Run from the project root directory.
 """
@@ -25,8 +25,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import pandas as pd
+
 from cropshield.features.yield_targets import build_yield_targets
 from cropshield.features.weather_features import compute_weather_features, save_weather_features
+from cropshield.data.build_county_panel import build_modeling_panel
+from cropshield.features.panel_features import get_feature_columns
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,16 +48,17 @@ def parse_args() -> argparse.Namespace:
         "--method", choices=["rolling", "trend"], default="rolling",
         help="Expected yield method (default: rolling)",
     )
-    parser.add_argument("--window",    type=int, default=5, help="Rolling window (years)")
-    parser.add_argument("--min-periods", type=int, default=3,
-                        help="Min periods for rolling window")
-    parser.add_argument("--min-years", type=int, default=5,
-                        help="Min years for trend fit")
-    parser.add_argument("--quantile",  type=float, default=0.20,
-                        help="Severe-risk quantile threshold (default: 0.20)")
+    parser.add_argument("--window",      type=int,   default=5,    help="Rolling window (years)")
+    parser.add_argument("--min-periods", type=int,   default=3,    help="Min periods for rolling")
+    parser.add_argument("--min-years",   type=int,   default=5,    help="Min years for trend fit")
+    parser.add_argument("--quantile",    type=float, default=0.20, help="Severe-risk quantile")
     parser.add_argument(
         "--nass-file", default="data/interim/nass_yield_clean.csv",
         help="Path to cleaned NASS yield CSV",
+    )
+    parser.add_argument(
+        "--targets-only", action="store_true",
+        help="Only build yield targets; skip weather merge and panel assembly",
     )
     return parser.parse_args()
 
@@ -61,22 +66,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     logger.info("=== CropShield: Step 2 — Build Features ===")
-    logger.info("Expected yield method: %s | window=%d | quantile=%.2f",
-                args.method, args.window, args.quantile)
 
     # ── 1. Yield targets ─────────────────────────────────────────────────────
     nass_path = Path(args.nass_file)
     if not nass_path.exists():
-        logger.error(
-            "NASS clean file not found at %s. Run scripts/01_fetch_data.py first.",
-            nass_path,
-        )
+        logger.error("NASS file not found at %s. Run scripts/01_fetch_data.py first.", nass_path)
         sys.exit(1)
 
-    import pandas as pd
+    logger.info("--- Building yield targets (method=%s) ---", args.method)
     nass_df = pd.read_csv(nass_path)
-    logger.info("Loaded NASS data: %d rows from %s", len(nass_df), nass_path)
-
     targets_df = build_yield_targets(
         nass_df,
         method=args.method,
@@ -86,42 +84,74 @@ def main() -> None:
         risk_quantile=args.quantile,
         output_path="data/interim/yield_targets.csv",
     )
+    valid_targets = targets_df.dropna(subset=["yield_anomaly"])
+    logger.info(
+        "Yield targets: %d total rows | %d with targets | mean anomaly=%.2f bu/acre",
+        len(targets_df), len(valid_targets), valid_targets["yield_anomaly"].mean(),
+    )
 
-    # Print summary stats
-    valid = targets_df.dropna(subset=["yield_anomaly"])
-    print("\n── Yield Target Summary ──────────────────────────────")
-    print(f"  Total rows:           {len(targets_df)}")
-    print(f"  Rows with targets:    {len(valid)}")
-    print(f"  Rows without targets: {len(targets_df) - len(valid)}  (insufficient history)")
-    print(f"  Years:                {int(targets_df['year'].min())}–{int(targets_df['year'].max())}")
-    print(f"  Mean yield anomaly:   {valid['yield_anomaly'].mean():.2f} bu/acre")
-    print(f"  Std yield anomaly:    {valid['yield_anomaly'].std():.2f} bu/acre")
-    print(f"  Severe-risk rows:     {int((valid['severe_risk'] == 1).sum())}  "
-          f"({100 * (valid['severe_risk'] == 1).mean():.1f}%)")
-    print()
-    print("Sample rows with targets:")
-    print(valid[["year","state","county","yield_anomaly","yield_anomaly_pct","severe_risk"]]
-          .head(10).to_string(index=False))
-    print()
+    if args.targets_only:
+        logger.info("--targets-only flag set; skipping weather and panel steps.")
+        logger.info("=== Step 2 complete (targets only) ===")
+        return
 
-    # ── 2. Weather features ──────────────────────────────────────────────────
+    # ── 2. Weather features ───────────────────────────────────────────────────
     weather_raw_path = Path("data/raw/weather_daily_raw.csv")
+    weather_features_path = Path("data/processed/weather_features.csv")
+
     if weather_raw_path.exists():
         logger.info("--- Computing weather features ---")
-        import pandas as _pd
-        daily_df = _pd.read_csv(weather_raw_path, parse_dates=["date"])
+        daily_df = pd.read_csv(weather_raw_path, parse_dates=["date"])
         weather_features = compute_weather_features(daily_df)
-        save_weather_features(weather_features, "data/processed/weather_features.csv")
-        print(f"\nWeather features: {weather_features.shape}")
-        print(weather_features.describe().to_string())
+        save_weather_features(weather_features, weather_features_path)
+        logger.info(
+            "Weather features: %d county-year rows | %d counties | %d feature columns",
+            len(weather_features),
+            weather_features["county_fips"].nunique(),
+            len(weather_features.columns) - 3,  # subtract id cols
+        )
     else:
-        logger.info("--- Weather raw file not found; run 01_fetch_data.py first ---")
+        logger.warning(
+            "Weather raw file not found at %s. "
+            "Run: python scripts/01_fetch_data.py --skip-drought",
+            weather_raw_path,
+        )
+        logger.warning("Skipping weather features and panel assembly.")
+        logger.info("=== Step 2 complete (targets only — no weather data) ===")
+        return
 
-    # ── 3. Drought features ──────────────────────────────────────────────────
+    # ── 3. Drought features (placeholder) ─────────────────────────────────────
     logger.info("--- Drought Monitor features not yet implemented ---")
 
-    # ── 4. Build modeling panel ──────────────────────────────────────────────
-    logger.info("--- Panel assembly not yet implemented (Prompt 5) ---")
+    # ── 4. Build modeling panel ───────────────────────────────────────────────
+    logger.info("--- Assembling modeling panel ---")
+    panel = build_modeling_panel(
+        yield_path="data/interim/yield_targets.csv",
+        weather_path=str(weather_features_path),
+        drought_path=None,
+        output_path="data/processed/modeling_panel.csv",
+        missingness_path="reports/missingness_report.csv",
+        drop_missing_target=True,
+    )
+
+    feature_cols = get_feature_columns(panel)
+    print("\n── Modeling Panel Summary ────────────────────────────────────")
+    print(f"  Rows:              {len(panel):,}")
+    print(f"  Unique counties:   {panel['county_fips'].nunique()}")
+    print(f"  States:            {sorted(panel['state'].unique())}")
+    print(f"  Years:             {int(panel['year'].min())}–{int(panel['year'].max())}")
+    print(f"  Feature columns:   {len(feature_cols)}")
+    print(f"  Feature names:     {feature_cols}")
+    print(f"  Severe-risk rows:  {int((panel['severe_risk'] == 1).sum())} "
+          f"({100*(panel['severe_risk'] == 1).mean():.1f}%)")
+    print()
+    print("Sample rows:")
+    cols_to_show = ["year", "state", "county", "yield_anomaly",
+                    "cumulative_precip", "extreme_heat_days",
+                    "growing_degree_days", "severe_risk"]
+    cols_present = [c for c in cols_to_show if c in panel.columns]
+    print(panel[cols_present].head(8).to_string(index=False))
+    print()
 
     logger.info("=== Step 2 complete ===")
 
