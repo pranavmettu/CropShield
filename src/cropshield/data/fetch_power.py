@@ -271,16 +271,38 @@ def fetch_power_all_counties(
     checkpoint_path = output_raw.with_suffix(".checkpoint.csv")
 
     # ── Resume from checkpoint if it exists ──────────────────────────────────
+    import datetime as _dt
+    end_yr = end_year or _dt.datetime.now().year
+    required_years = set(range(start_year, end_yr + 1))
+
     completed_fips: set[str] = set()
     # all_data accumulates ALL fetched frames in memory for correct checkpointing
     all_data: list[pd.DataFrame] = []
     if checkpoint_path.exists():
-        ckpt = pd.read_csv(checkpoint_path, low_memory=False)
-        completed_fips = set(ckpt["county_fips"].unique())
+        # Explicitly read county_fips as str to avoid int64 infer after CSV round-trip.
+        # Without this, "17001" is read as int64(17001) and set-membership checks against
+        # the string-typed centroids DataFrame silently fail, causing re-fetches or skips.
+        ckpt = pd.read_csv(
+            checkpoint_path, low_memory=False,
+            dtype={"county_fips": str, "state_fips": str},
+        )
+        # A county is "complete" only if every year in the requested range
+        # is present.  Checking only county_fips would skip a county whose
+        # checkpoint was written with an older (shorter) year range.
+        ckpt_years_by_fips = (
+            ckpt.groupby("county_fips")["year"]
+            .apply(lambda s: set(s.astype(int)))
+        )
+        completed_fips = {
+            fips
+            for fips, years in ckpt_years_by_fips.items()
+            if required_years <= years
+        }
         all_data.append(ckpt)
         logger.info(
-            "Resuming from checkpoint: %d counties already fetched",
-            len(completed_fips),
+            "Resuming from checkpoint: %d counties fully complete "
+            "(covering years %d–%d)",
+            len(completed_fips), start_year, end_yr,
         )
 
     remaining = county_centroids[~county_centroids["county_fips"].isin(completed_fips)]

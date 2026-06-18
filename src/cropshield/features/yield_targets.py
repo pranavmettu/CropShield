@@ -80,6 +80,11 @@ def clean_yield_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                     n_dropped, 100 * n_dropped / n_before)
 
     df = df.sort_values(GROUP_KEYS + ["year"]).reset_index(drop=True)
+
+    if len(df) == 0:
+        logger.warning("clean_yield_dataframe: 0 rows after cleaning — all yields were missing or suppressed")
+        return df
+
     logger.info("clean_yield_dataframe: %d rows, %d unique county-crops, years %d–%d",
                 len(df), df.groupby(GROUP_KEYS).ngroups,
                 int(df["year"].min()), int(df["year"].max()))

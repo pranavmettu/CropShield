@@ -56,13 +56,18 @@ def _normalise_fips(series: pd.Series) -> pd.Series:
     """Convert a county_fips Series to zero-padded 5-character strings.
 
     Handles floats (17001.0), ints (17001), and existing strings ('17001').
+    NaN / None / empty strings are preserved as ``pd.NA`` rather than
+    being silently converted to the invalid string ``"00nan"``.
     """
-    return (
-        series.astype(str)
-        .str.split(".").str[0]   # remove ".0" from float representations
+    s = series.astype(str).str.strip()
+    missing_mask = s.isin({"nan", "None", "NaN", ""})
+    result = (
+        s.str.split(".").str[0]  # strip ".0" from float repr
         .str.strip()
         .str.zfill(5)
     )
+    result = result.where(~missing_mask, other=pd.NA)
+    return result
 
 
 def build_modeling_panel(
@@ -131,6 +136,16 @@ def build_modeling_panel(
     weather = weather.drop(
         columns=[c for c in ("county", "state", "state_fips") if c in weather.columns]
     )
+    # Deduplicate weather on merge keys before joining; duplicates would fan out
+    # the panel (1 yield row → N panel rows) without any exception being raised.
+    n_weather_before = len(weather)
+    weather = weather.drop_duplicates(subset=WEATHER_MERGE_KEYS, keep="first")
+    if len(weather) < n_weather_before:
+        logger.warning(
+            "Dropped %d duplicate (county_fips, year) rows from weather features "
+            "before merge to prevent row multiplication.",
+            n_weather_before - len(weather),
+        )
     logger.info("Loaded weather features: %d county-year rows", len(weather))
     validate_merge_keys(weather, "weather features", keys=WEATHER_MERGE_KEYS)
 

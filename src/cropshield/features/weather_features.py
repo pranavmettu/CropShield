@@ -41,8 +41,15 @@ GROUP_COLS = ["county_fips", "state_fips", "year"]
 
 # ── Season filter ─────────────────────────────────────────────────────────────
 
-def filter_growing_season(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
+def filter_growing_season(
+    df: pd.DataFrame,
+    date_col: str = "date",
+    cutoff_date: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
     """Keep only rows that fall within the April–August growing season.
+
+    Optionally applies an as-of-date cutoff so that features computed from
+    a partially-elapsed season do not leak future weather observations.
 
     Parameters
     ----------
@@ -50,16 +57,25 @@ def filter_growing_season(df: pd.DataFrame, date_col: str = "date") -> pd.DataFr
         Daily weather records with a date column.
     date_col : str
         Name of the date column.
+    cutoff_date : str or Timestamp, optional
+        If provided, records *after* this date are excluded even if they fall
+        within the April–August window.  Useful for computing mid-season
+        features and for testing that future observations cannot affect past
+        feature values.
 
     Returns
     -------
     pd.DataFrame
-        Filtered DataFrame containing only growing-season rows.
+        Filtered DataFrame containing only growing-season rows up to
+        (and including) ``cutoff_date``.
     """
     df = df.copy()
     df[date_col] = pd.to_datetime(df[date_col])
     month = df[date_col].dt.month
     mask = (month >= GROWING_SEASON_START_MONTH) & (month <= GROWING_SEASON_END_MONTH)
+    if cutoff_date is not None:
+        cutoff_ts = pd.Timestamp(cutoff_date)
+        mask = mask & (df[date_col] <= cutoff_ts)
     return df[mask].reset_index(drop=True)
 
 
@@ -202,6 +218,7 @@ def add_precip_anomaly(features_df: pd.DataFrame, precip_col: str = "cumulative_
 def compute_weather_features(
     daily_df: pd.DataFrame,
     group_cols: list[str] | None = None,
+    cutoff_date: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Aggregate daily weather into county-year growing-season features.
 
@@ -212,6 +229,9 @@ def compute_weather_features(
         ``year``, ``date``, ``PRECTOTCORR``, ``T2M``, ``T2M_MIN``, ``T2M_MAX``.
     group_cols : list[str], optional
         Columns to group on. Defaults to ``["county_fips", "state_fips", "year"]``.
+    cutoff_date : str or Timestamp, optional
+        If set, records after this date are excluded before aggregation.
+        Passed through to ``filter_growing_season``.
 
     Returns
     -------
@@ -224,7 +244,7 @@ def compute_weather_features(
     grp_cols = group_cols or GROUP_COLS
 
     # ── 1. Filter to growing season ──────────────────────────────────────────
-    season_df = filter_growing_season(daily_df)
+    season_df = filter_growing_season(daily_df, cutoff_date=cutoff_date)
     logger.info(
         "compute_weather_features: %d daily rows after growing-season filter",
         len(season_df),
