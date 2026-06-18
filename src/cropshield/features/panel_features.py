@@ -121,6 +121,8 @@ def get_feature_columns(panel: pd.DataFrame) -> list[str]:
     non_features = {
         # Identifiers
         "year", "state", "county", "county_fips", "crop",
+        # Stray NASS metadata
+        "unit",
         # Targets
         "actual_yield", "expected_yield",
         "yield_anomaly", "yield_anomaly_pct", "severe_risk",

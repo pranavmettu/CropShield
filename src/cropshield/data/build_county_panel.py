@@ -159,7 +159,13 @@ def build_modeling_panel(
         else:
             logger.warning("Drought path provided but file not found: %s", drought_path)
 
-    # ── 5. Add panel-level derived features ──────────────────────────────────
+    # ── 5. Drop stray metadata columns from source files ─────────────────────
+    drop_cols = [c for c in ("unit",) if c in panel.columns]
+    if drop_cols:
+        panel = panel.drop(columns=drop_cols)
+        logger.info("Dropped non-feature metadata columns: %s", drop_cols)
+
+    # ── 6. Add panel-level derived features ──────────────────────────────────
     panel = add_year_index(panel)
     panel = add_heat_stress_features(panel)
 
