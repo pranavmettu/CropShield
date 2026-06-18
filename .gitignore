@@ -59,10 +59,14 @@ data/external/
 !data/external/.gitkeep
 
 # ── Model artifacts ──────────────────────────────────────────────────────────
-models/
+# Trained-model artifact dirs at repo root or under data/ (NOT the source
+# package src/cropshield/models/, which must stay tracked).
+/models/
+data/models/
 *.joblib
 *.model
 *.bin
+*.pkl
 
 # ── Reports / figures (generated outputs) ────────────────────────────────────
 reports/figures/
