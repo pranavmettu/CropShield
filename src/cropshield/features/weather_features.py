@@ -32,11 +32,32 @@ logger = logging.getLogger(__name__)
 
 GROWING_SEASON_START_MONTH = 4   # April
 GROWING_SEASON_END_MONTH   = 8   # August
+# April(30) + May(31) + June(30) + July(31) + August(31)
+FULL_GROWING_SEASON_DAYS   = 153
 GDD_BASE_TEMP_C            = 10.0
 EXTREME_HEAT_THRESHOLD_C   = 35.0
 DRY_DAY_THRESHOLD_MM       = 1.0
 
 GROUP_COLS = ["county_fips", "state_fips", "year"]
+
+# Checkpoint definitions: name → "MM-DD" cutoff within the growing season.
+# None means no intra-season cutoff (use all available April-August data).
+CHECKPOINT_CONFIGS: dict[str, str | None] = {
+    "may_31":     "05-31",
+    "june_30":    "06-30",
+    "july_31":    "07-31",
+    "august_31":  "08-31",
+    "full_season": None,
+}
+
+# Days in growing season through each checkpoint month-end
+_CHECKPOINT_DAYS = {
+    "may_31":     61,   # Apr(30) + May(31)
+    "june_30":    91,   # + Jun(30)
+    "july_31":    122,  # + Jul(31)
+    "august_31":  153,  # + Aug(31)
+    "full_season": 153,
+}
 
 
 # ── Season filter ─────────────────────────────────────────────────────────────
@@ -45,11 +66,24 @@ def filter_growing_season(
     df: pd.DataFrame,
     date_col: str = "date",
     cutoff_date: str | pd.Timestamp | None = None,
+    cutoff_month_day: str | None = None,
 ) -> pd.DataFrame:
     """Keep only rows that fall within the April–August growing season.
 
-    Optionally applies an as-of-date cutoff so that features computed from
-    a partially-elapsed season do not leak future weather observations.
+    Optionally applies a cutoff to prevent future weather from leaking into
+    earlier-checkpoint features.  Two cutoff modes are supported:
+
+    ``cutoff_date``
+        Absolute timestamp — filters rows after that specific date.  Useful
+        for unit-testing leakage with a fixed calendar date.
+
+    ``cutoff_month_day``
+        Year-agnostic ``"MM-DD"`` string (e.g. ``"05-31"`` for May 31).
+        Applied relative to each row's own calendar year so that all years
+        are consistently trimmed to the same within-season window.  This is
+        the correct mode for building multi-checkpoint panels.
+
+    When both are provided, ``cutoff_month_day`` takes priority.
 
     Parameters
     ----------
@@ -58,24 +92,33 @@ def filter_growing_season(
     date_col : str
         Name of the date column.
     cutoff_date : str or Timestamp, optional
-        If provided, records *after* this date are excluded even if they fall
-        within the April–August window.  Useful for computing mid-season
-        features and for testing that future observations cannot affect past
-        feature values.
+        Absolute cutoff date.
+    cutoff_month_day : str, optional
+        ``"MM-DD"`` within-season cutoff applied per calendar year.
 
     Returns
     -------
     pd.DataFrame
-        Filtered DataFrame containing only growing-season rows up to
-        (and including) ``cutoff_date``.
+        Filtered DataFrame containing only qualifying growing-season rows.
     """
     df = df.copy()
     df[date_col] = pd.to_datetime(df[date_col])
     month = df[date_col].dt.month
-    mask = (month >= GROWING_SEASON_START_MONTH) & (month <= GROWING_SEASON_END_MONTH)
-    if cutoff_date is not None:
+    day   = df[date_col].dt.day
+    mask  = (month >= GROWING_SEASON_START_MONTH) & (month <= GROWING_SEASON_END_MONTH)
+
+    if cutoff_month_day is not None:
+        # Parse "MM-DD"
+        parts = cutoff_month_day.split("-")
+        cutoff_mm, cutoff_dd = int(parts[0]), int(parts[1])
+        within_cutoff = (month < cutoff_mm) | (
+            (month == cutoff_mm) & (day <= cutoff_dd)
+        )
+        mask = mask & within_cutoff
+    elif cutoff_date is not None:
         cutoff_ts = pd.Timestamp(cutoff_date)
         mask = mask & (df[date_col] <= cutoff_ts)
+
     return df[mask].reset_index(drop=True)
 
 
@@ -219,6 +262,7 @@ def compute_weather_features(
     daily_df: pd.DataFrame,
     group_cols: list[str] | None = None,
     cutoff_date: str | pd.Timestamp | None = None,
+    cutoff_month_day: str | None = None,
 ) -> pd.DataFrame:
     """Aggregate daily weather into county-year growing-season features.
 
@@ -230,8 +274,11 @@ def compute_weather_features(
     group_cols : list[str], optional
         Columns to group on. Defaults to ``["county_fips", "state_fips", "year"]``.
     cutoff_date : str or Timestamp, optional
-        If set, records after this date are excluded before aggregation.
-        Passed through to ``filter_growing_season``.
+        Absolute cutoff. Passed through to ``filter_growing_season``.
+    cutoff_month_day : str, optional
+        Year-agnostic ``"MM-DD"`` cutoff (e.g. ``"05-31"``).  Applied per
+        calendar year so each year's features are trimmed to the same
+        within-season window.  Takes priority over ``cutoff_date``.
 
     Returns
     -------
@@ -244,7 +291,11 @@ def compute_weather_features(
     grp_cols = group_cols or GROUP_COLS
 
     # ── 1. Filter to growing season ──────────────────────────────────────────
-    season_df = filter_growing_season(daily_df, cutoff_date=cutoff_date)
+    season_df = filter_growing_season(
+        daily_df,
+        cutoff_date=cutoff_date,
+        cutoff_month_day=cutoff_month_day,
+    )
     logger.info(
         "compute_weather_features: %d daily rows after growing-season filter",
         len(season_df),
@@ -274,7 +325,10 @@ def compute_weather_features(
 
     features = pd.DataFrame(records)
 
-    # ── 3. Add leakage-safe precipitation anomaly ────────────────────────────
+    # ── 3. Flag incomplete growing seasons ───────────────────────────────────
+    features["is_partial_year"] = features["obs_days"] < FULL_GROWING_SEASON_DAYS
+
+    # ── 4. Add leakage-safe precipitation anomaly ────────────────────────────
     features = add_precip_anomaly(features)
 
     logger.info(
@@ -285,6 +339,127 @@ def compute_weather_features(
         int(features["year"].max()),
     )
     return features
+
+
+def compute_multi_checkpoint_weather_features(
+    daily_df: pd.DataFrame,
+    checkpoints: list[str] | None = None,
+    group_cols: list[str] | None = None,
+) -> pd.DataFrame:
+    """Compute weather features for each named checkpoint.
+
+    For every checkpoint in ``checkpoints``, the growing-season window is
+    trimmed to the checkpoint's month-day boundary using
+    ``CHECKPOINT_CONFIGS``.  This ensures that a ``may_31`` feature row for
+    year 2020 only contains weather observations through 2020-05-31.
+
+    The ``precip_anomaly`` for each checkpoint is computed independently
+    using only prior-year data for that same seasonal window — leakage-safe.
+
+    Parameters
+    ----------
+    daily_df : pd.DataFrame
+        Full daily weather records (all years, all growing-season months).
+    checkpoints : list[str], optional
+        Subset of ``CHECKPOINT_CONFIGS`` keys to compute.
+        Defaults to all five: may_31, june_30, july_31, august_31,
+        full_season.
+    group_cols : list[str], optional
+        Columns to group on within each checkpoint.
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-format DataFrame with one row per
+        ``(county_fips, year, checkpoint)``.  Adds a ``checkpoint`` column.
+    """
+    ckpts = checkpoints or list(CHECKPOINT_CONFIGS.keys())
+    frames: list[pd.DataFrame] = []
+
+    for name in ckpts:
+        if name not in CHECKPOINT_CONFIGS:
+            raise ValueError(
+                f"Unknown checkpoint {name!r}. "
+                f"Choose from: {list(CHECKPOINT_CONFIGS.keys())}"
+            )
+        month_day = CHECKPOINT_CONFIGS[name]
+        features = compute_weather_features(
+            daily_df,
+            group_cols=group_cols,
+            cutoff_month_day=month_day,
+        )
+        features.insert(features.columns.get_loc("year") + 1, "checkpoint", name)
+        frames.append(features)
+        logger.info("Checkpoint %s: %d county-year rows", name, len(features))
+
+    combined = pd.concat(frames, ignore_index=True)
+    logger.info(
+        "compute_multi_checkpoint_weather_features: %d total rows "
+        "(%d checkpoints × ~%d county-years)",
+        len(combined),
+        len(ckpts),
+        len(combined) // len(ckpts) if ckpts else 0,
+    )
+    return combined
+
+
+def filter_incomplete_current_year(
+    features_df: pd.DataFrame,
+    *,
+    allow_partial_year: bool = False,
+    current_year: int | None = None,
+    year_col: str = "year",
+    obs_col: str = "obs_days",
+) -> pd.DataFrame:
+    """Exclude or flag incomplete weather for the current calendar year.
+
+    By default, rows for ``current_year`` with fewer than
+    ``FULL_GROWING_SEASON_DAYS`` observations are **dropped** so they cannot
+    enter model training with biased partial-season aggregates.
+
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        County-year weather features including ``obs_days``.
+    allow_partial_year : bool
+        When ``True``, keep partial rows and ensure ``is_partial_year`` is set.
+    current_year : int, optional
+        Calendar year treated as "current". Defaults to today's year.
+    year_col, obs_col : str
+        Column names for year and observation count.
+
+    Returns
+    -------
+    pd.DataFrame
+        Filtered (or flagged) features.
+    """
+    import datetime as _dt
+
+    df = features_df.copy()
+    if "is_partial_year" not in df.columns and obs_col in df.columns:
+        df["is_partial_year"] = df[obs_col] < FULL_GROWING_SEASON_DAYS
+
+    cy = current_year or _dt.date.today().year
+    partial_current = (df[year_col] == cy) & df.get("is_partial_year", False)
+
+    if allow_partial_year:
+        n_partial = int(partial_current.sum())
+        if n_partial:
+            logger.warning(
+                "allow_partial_year=True: keeping %d partial current-year (%d) rows",
+                n_partial, cy,
+            )
+        return df
+
+    n_drop = int(partial_current.sum())
+    if n_drop:
+        logger.info(
+            "Excluding %d incomplete current-year (%d) weather rows "
+            "(obs_days < %d). Set allow_partial_year=True to keep them.",
+            n_drop, cy, FULL_GROWING_SEASON_DAYS,
+        )
+        df = df[~partial_current].copy()
+    return df
 
 
 def save_weather_features(

@@ -1,32 +1,9 @@
 """
 U.S. Drought Monitor data fetcher for CropShield.
 
-Retrieves weekly county-level drought severity statistics from the
-U.S. Drought Monitor and saves them to the data pipeline.
-
-Data Source
------------
-U.S. Drought Monitor: https://droughtmonitor.unl.edu/
-County-level tabular statistics are available via:
-  https://usdm.climate.unl.edu/DM_Export.ashx?
-
-Drought Categories
-------------------
-D0 : Abnormally Dry
-D1 : Moderate Drought
-D2 : Severe Drought
-D3 : Extreme Drought
-D4 : Exceptional Drought
-
-Each category value represents the percentage of the county area in that
-drought category for a given week.
-
-Notes
------
-- No API key is required.
-- Data is reported weekly (typically on Tuesdays).
-- This module only fetches and lightly cleans the data. Growing-season
-  aggregation lives in src/cropshield/features/drought_features.py.
+Live API fetching is optional; ``clean_drought_dataframe`` and feature
+engineering in ``drought_features.py`` work on any raw CSV matching the
+expected schema.
 """
 
 from __future__ import annotations
@@ -35,7 +12,8 @@ import logging
 from pathlib import Path
 
 import pandas as pd
-import requests
+
+from cropshield.data.fips_utils import normalise_fips_series, nass_csv_dtypes
 
 logger = logging.getLogger(__name__)
 
@@ -48,62 +26,74 @@ def fetch_drought_monitor(
     start_year: int = 2015,
     end_year: int | None = None,
     output_raw: str | Path = "data/raw/drought_monitor.csv",
-    output_clean: str | Path = "data/interim/drought_features.csv",
+    output_clean: str | Path = "data/interim/drought_monitor_clean.csv",
 ) -> pd.DataFrame:
     """Fetch weekly county-level drought statistics from the U.S. Drought Monitor.
 
-    Parameters
-    ----------
-    state_fips_list : list[str]
-        Two-digit state FIPS codes (e.g. ``["19", "17"]`` for Iowa and Illinois).
-    start_year : int
-        First year to fetch (inclusive).
-    end_year : int, optional
-        Last year to fetch (inclusive). Defaults to current year.
-    output_raw : str or Path
-        Destination for the raw response CSV.
-    output_clean : str or Path
-        Destination for the cleaned drought features CSV.
+    Live API integration is not yet implemented.  If ``output_raw`` already
+    exists on disk, it is cleaned and returned instead.
 
-    Returns
-    -------
-    pd.DataFrame
-        Weekly drought statistics with columns: ``date``, ``county_fips``,
-        ``D0``, ``D1``, ``D2``, ``D3``, ``D4``.
+    Raises
+    ------
+    NotImplementedError
+        When no raw file exists and a live fetch would be required.
     """
-    # TODO: Implement Drought Monitor API call
-    # Steps:
-    # 1. Build date range: weekly Tuesdays from start_year through end_year
-    # 2. For each state FIPS, construct request URL with StatisticTypeId=1 (county area)
-    # 3. Parse the response (CSV or JSON format)
-    # 4. Standardise column names and FIPS codes
-    # 5. Save raw data
-    # 6. Call clean_drought_dataframe()
-    # 7. Save clean data
-    # 8. Return clean DataFrame
-    raise NotImplementedError("fetch_drought_monitor is not yet implemented.")
+    output_raw = Path(output_raw)
+    if output_raw.exists():
+        logger.info("Loading existing drought raw file → %s", output_raw)
+        header = pd.read_csv(output_raw, nrows=0)
+        raw = pd.read_csv(output_raw, dtype=nass_csv_dtypes(header.columns))
+        clean = clean_drought_dataframe(raw)
+        output_clean = Path(output_clean)
+        output_clean.parent.mkdir(parents=True, exist_ok=True)
+        clean.to_csv(output_clean, index=False)
+        return clean
+
+    raise NotImplementedError(
+        "Live Drought Monitor API fetch is not yet implemented. "
+        f"Place raw weekly data at {output_raw} or implement the API client first."
+    )
 
 
 def clean_drought_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Standardise a raw Drought Monitor DataFrame.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Raw drought monitor records.
-
     Returns
     -------
     pd.DataFrame
-        Cleaned DataFrame with columns: ``date``, ``county_fips``,
-        ``D0``, ``D1``, ``D2``, ``D3``, ``D4``.
-        All category columns are floats representing percentage area (0–100).
+        Columns: ``date``, ``county_fips``, ``year``, ``D0``–``D4``.
+        Category columns are floats (0–100).  ``county_fips`` is a 5-char string.
     """
-    # TODO: Implement cleaning
-    # Steps:
-    # 1. Parse date column to datetime
-    # 2. Standardise FIPS codes to 5-digit zero-padded strings
-    # 3. Coerce drought category columns to float
-    # 4. Fill NaN drought categories with 0.0
-    # 5. Add a D2_plus column = D2 + D3 + D4 (for quick filtering)
-    raise NotImplementedError("clean_drought_dataframe is not yet implemented.")
+    df = df.copy()
+
+    # Normalise common column name variants
+    rename_map = {
+        "MapDate": "date",
+        "FIPS": "county_fips",
+        "CountyFIPS": "county_fips",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+    if "date" not in df.columns:
+        raise KeyError("clean_drought_dataframe: 'date' column not found.")
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+
+    if "county_fips" in df.columns:
+        df["county_fips"] = normalise_fips_series(df["county_fips"])
+
+    df["year"] = df["date"].dt.year.astype("Int64")
+
+    for cat in DROUGHT_CATEGORIES:
+        if cat not in df.columns:
+            df[cat] = 0.0
+        df[cat] = pd.to_numeric(df[cat], errors="coerce").fillna(0.0).clip(0.0, 100.0)
+
+    keep = ["date", "county_fips", "year"] + DROUGHT_CATEGORIES
+    df = df[keep].sort_values(["county_fips", "date"]).reset_index(drop=True)
+    logger.info(
+        "clean_drought_dataframe: %d weekly rows | %d counties",
+        len(df), df["county_fips"].nunique(),
+    )
+    return df

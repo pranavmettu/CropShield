@@ -28,8 +28,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import pandas as pd
 
 from cropshield.features.yield_targets import build_yield_targets
-from cropshield.features.weather_features import compute_weather_features, save_weather_features
+from cropshield.features.weather_features import (
+    compute_weather_features,
+    compute_multi_checkpoint_weather_features,
+    save_weather_features,
+    filter_incomplete_current_year,
+    CHECKPOINT_CONFIGS,
+)
 from cropshield.data.build_county_panel import build_modeling_panel
+from cropshield.data.fips_utils import load_nass_yield_csv
 from cropshield.features.panel_features import get_feature_columns
 
 logging.basicConfig(
@@ -54,11 +61,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quantile",    type=float, default=0.20, help="Severe-risk quantile")
     parser.add_argument(
         "--nass-file", default="data/interim/nass_yield_clean.csv",
-        help="Path to cleaned NASS yield CSV",
+        help="Path to cleaned NASS yield CSV (may contain multiple crops)",
+    )
+    parser.add_argument(
+        "--checkpoints",
+        nargs="+",
+        default=list(CHECKPOINT_CONFIGS.keys()),
+        help="Checkpoint names to include (default: all 5)",
+    )
+    parser.add_argument(
+        "--single-checkpoint",
+        action="store_true",
+        help="Use only full_season (legacy behaviour, no multi-checkpoint fanout)",
     )
     parser.add_argument(
         "--targets-only", action="store_true",
         help="Only build yield targets; skip weather merge and panel assembly",
+    )
+    parser.add_argument(
+        "--descriptive-risk", action="store_true",
+        help="Add severe_risk_descriptive labels (EDA only — not for modeling)",
+    )
+    parser.add_argument(
+        "--allow-partial-year", action="store_true",
+        help="Keep incomplete current-year weather rows in the modeling panel",
     )
     return parser.parse_args()
 
@@ -74,7 +100,7 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("--- Building yield targets (method=%s) ---", args.method)
-    nass_df = pd.read_csv(nass_path)
+    nass_df = load_nass_yield_csv(nass_path)
     targets_df = build_yield_targets(
         nass_df,
         method=args.method,
@@ -82,6 +108,7 @@ def main() -> None:
         min_periods=args.min_periods,
         min_years=args.min_years,
         risk_quantile=args.quantile,
+        add_descriptive_risk=args.descriptive_risk,
         output_path="data/interim/yield_targets.csv",
     )
     valid_targets = targets_df.dropna(subset=["yield_anomaly"])
@@ -102,13 +129,30 @@ def main() -> None:
     if weather_raw_path.exists():
         logger.info("--- Computing weather features ---")
         daily_df = pd.read_csv(weather_raw_path, parse_dates=["date"])
-        weather_features = compute_weather_features(daily_df)
+
+        if args.single_checkpoint:
+            logger.info("--single-checkpoint: computing full_season only")
+            weather_features = compute_weather_features(daily_df)
+            weather_features["checkpoint"] = "full_season"
+        else:
+            checkpoints = args.checkpoints
+            logger.info("Computing %d checkpoints: %s", len(checkpoints), checkpoints)
+            weather_features = compute_multi_checkpoint_weather_features(
+                daily_df, checkpoints=checkpoints
+            )
+
+        weather_features = filter_incomplete_current_year(
+            weather_features,
+            allow_partial_year=args.allow_partial_year,
+        )
         save_weather_features(weather_features, weather_features_path)
+        n_ckpts = weather_features["checkpoint"].nunique() if "checkpoint" in weather_features.columns else 1
         logger.info(
-            "Weather features: %d county-year rows | %d counties | %d feature columns",
+            "Weather features: %d rows | %d counties | %d checkpoints | %d feature cols",
             len(weather_features),
             weather_features["county_fips"].nunique(),
-            len(weather_features.columns) - 3,  # subtract id cols
+            n_ckpts,
+            len(weather_features.columns) - 4,
         )
     else:
         logger.warning(
@@ -132,6 +176,7 @@ def main() -> None:
         output_path="data/processed/modeling_panel.csv",
         missingness_path="reports/missingness_report.csv",
         drop_missing_target=True,
+        allow_partial_year=args.allow_partial_year,
     )
 
     feature_cols = get_feature_columns(panel)
@@ -140,15 +185,18 @@ def main() -> None:
     print(f"  Unique counties:   {panel['county_fips'].nunique()}")
     print(f"  States:            {sorted(panel['state'].unique())}")
     print(f"  Years:             {int(panel['year'].min())}–{int(panel['year'].max())}")
+    if "crop" in panel.columns:
+        print(f"  Crops:             {sorted(panel['crop'].unique())}")
+    if "checkpoint" in panel.columns:
+        ckpts = sorted(panel["checkpoint"].dropna().unique())
+        print(f"  Checkpoints:       {ckpts}")
     print(f"  Feature columns:   {len(feature_cols)}")
     print(f"  Feature names:     {feature_cols}")
-    print(f"  Severe-risk rows:  {int((panel['severe_risk'] == 1).sum())} "
-          f"({100*(panel['severe_risk'] == 1).mean():.1f}%)")
     print()
     print("Sample rows:")
-    cols_to_show = ["year", "state", "county", "yield_anomaly",
-                    "cumulative_precip", "extreme_heat_days",
-                    "growing_degree_days", "severe_risk"]
+    cols_to_show = ["year", "state", "county", "crop", "checkpoint",
+                    "yield_anomaly", "cumulative_precip", "extreme_heat_days",
+                    "growing_degree_days"]
     cols_present = [c for c in cols_to_show if c in panel.columns]
     print(panel[cols_present].head(8).to_string(index=False))
     print()

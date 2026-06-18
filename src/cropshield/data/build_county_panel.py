@@ -37,37 +37,34 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+from cropshield.data.fips_utils import load_nass_yield_csv, normalise_fips_series
 from cropshield.features.panel_features import add_year_index, add_heat_stress_features
+from cropshield.features.weather_features import (
+    FULL_GROWING_SEASON_DAYS,
+    filter_incomplete_current_year,
+)
 
 logger = logging.getLogger(__name__)
 
-# Yield targets use (county_fips, year) as the weather join key;
-# state and crop come from the yield side.
+# Yield targets use (county_fips, year) as the base weather join key.
+# When weather features include a "checkpoint" column, the join naturally
+# fans out each yield row into one row per checkpoint.
 WEATHER_MERGE_KEYS = ["county_fips", "year"]
+
+# Final panel unique key (includes checkpoint if present)
+PANEL_UNIQUE_KEYS_BASE  = ["county_fips", "crop", "year"]
+PANEL_UNIQUE_KEYS_CKPT  = ["county_fips", "crop", "year", "checkpoint"]
 TARGET_COLUMN = "yield_anomaly"
 
 TARGET_COLUMNS = [
     "actual_yield", "expected_yield",
-    "yield_anomaly", "yield_anomaly_pct", "severe_risk",
+    "yield_anomaly", "yield_anomaly_pct", "severe_risk_descriptive",
 ]
 
 
 def _normalise_fips(series: pd.Series) -> pd.Series:
-    """Convert a county_fips Series to zero-padded 5-character strings.
-
-    Handles floats (17001.0), ints (17001), and existing strings ('17001').
-    NaN / None / empty strings are preserved as ``pd.NA`` rather than
-    being silently converted to the invalid string ``"00nan"``.
-    """
-    s = series.astype(str).str.strip()
-    missing_mask = s.isin({"nan", "None", "NaN", ""})
-    result = (
-        s.str.split(".").str[0]  # strip ".0" from float repr
-        .str.strip()
-        .str.zfill(5)
-    )
-    result = result.where(~missing_mask, other=pd.NA)
-    return result
+    """Backward-compatible alias for ``normalise_fips_series``."""
+    return normalise_fips_series(series)
 
 
 def build_modeling_panel(
@@ -77,6 +74,8 @@ def build_modeling_panel(
     output_path: str | Path = "data/processed/modeling_panel.csv",
     missingness_path: str | Path = "reports/missingness_report.csv",
     drop_missing_target: bool = True,
+    allow_partial_year: bool = False,
+    current_year: int | None = None,
 ) -> pd.DataFrame:
     """Merge all feature sources into the county-crop-year modeling panel.
 
@@ -95,6 +94,11 @@ def build_modeling_panel(
     drop_missing_target : bool
         Drop rows where ``yield_anomaly`` is NaN (insufficient rolling history).
         Set to ``False`` only for auditing — these rows cannot be used for modeling.
+    allow_partial_year : bool
+        When ``False`` (default), exclude rows for the current calendar year
+        whose weather ``obs_days`` is below a full growing season.
+    current_year : int, optional
+        Override for the calendar year treated as "current".
 
     Returns
     -------
@@ -115,9 +119,20 @@ def build_modeling_panel(
             f"Yield targets not found at {yield_path}. "
             "Run scripts/02_build_features.py --targets-only first."
         )
-    yields = pd.read_csv(yield_path)
-    yields["county_fips"] = _normalise_fips(yields["county_fips"])
+    yields = load_nass_yield_csv(yield_path)
     yields["year"] = pd.to_numeric(yields["year"], errors="coerce").astype("Int64")
+    # Drop rows whose county_fips could not be normalised (e.g. "OTHER (COMBINED) COUNTIES"
+    # aggregate rows from NASS that carry no unique county ANSI code).
+    n_before_fips = len(yields)
+    yields = yields.dropna(subset=["county_fips"])
+    yields = yields[yields["county_fips"].str.match(r"^\d{5}$", na=False)]
+    n_dropped_fips = n_before_fips - len(yields)
+    if n_dropped_fips:
+        logger.warning(
+            "Dropped %d yield rows with invalid/null county_fips "
+            "(likely NASS aggregate 'OTHER (COMBINED) COUNTIES' entries).",
+            n_dropped_fips,
+        )
     logger.info("Loaded yield targets: %d rows", len(yields))
 
     # ── 2. Load weather features ─────────────────────────────────────────────
@@ -127,26 +142,45 @@ def build_modeling_panel(
             f"Weather features not found at {weather_path}. "
             "Run scripts/01_fetch_data.py then scripts/02_build_features.py first."
         )
-    weather = pd.read_csv(weather_path)
-    weather["county_fips"] = _normalise_fips(weather["county_fips"])
+    weather = pd.read_csv(
+        weather_path,
+        dtype={"county_fips": "string", "state_fips": "string"},
+    )
+    weather["county_fips"] = normalise_fips_series(weather["county_fips"])
     weather["year"] = pd.to_numeric(weather["year"], errors="coerce").astype("Int64")
+
+    weather = filter_incomplete_current_year(
+        weather,
+        allow_partial_year=allow_partial_year,
+        current_year=current_year,
+    )
 
     # Drop county/state columns that came from weather centroids (avoid collision
     # with the authoritative columns from yield targets)
     weather = weather.drop(
         columns=[c for c in ("county", "state", "state_fips") if c in weather.columns]
     )
-    # Deduplicate weather on merge keys before joining; duplicates would fan out
-    # the panel (1 yield row → N panel rows) without any exception being raised.
+    # Determine merge keys: if weather has a "checkpoint" column, include it
+    # so each (county_fips, year, checkpoint) triple is unique.  The fanout
+    # from the merge is intentional: one yield row → N checkpoint rows.
+    has_checkpoint = "checkpoint" in weather.columns
+    weather_dedup_keys = (
+        WEATHER_MERGE_KEYS + ["checkpoint"] if has_checkpoint else WEATHER_MERGE_KEYS
+    )
     n_weather_before = len(weather)
-    weather = weather.drop_duplicates(subset=WEATHER_MERGE_KEYS, keep="first")
+    weather = weather.drop_duplicates(subset=weather_dedup_keys, keep="first")
     if len(weather) < n_weather_before:
         logger.warning(
-            "Dropped %d duplicate (county_fips, year) rows from weather features "
-            "before merge to prevent row multiplication.",
+            "Dropped %d duplicate %s rows from weather features.",
             n_weather_before - len(weather),
+            weather_dedup_keys,
         )
-    logger.info("Loaded weather features: %d county-year rows", len(weather))
+    logger.info(
+        "Loaded weather features: %d rows | %s=%s",
+        len(weather),
+        "checkpoints" if has_checkpoint else "(county_fips, year)",
+        sorted(weather["checkpoint"].unique()) if has_checkpoint else "n/a",
+    )
     validate_merge_keys(weather, "weather features", keys=WEATHER_MERGE_KEYS)
 
     # ── 3. Left-join weather onto yield targets ───────────────────────────────
@@ -201,7 +235,10 @@ def build_modeling_panel(
             )
 
     # ── 8. Final sort and save ────────────────────────────────────────────────
-    panel = panel.sort_values(["state", "county", "year", "crop"]).reset_index(drop=True)
+    sort_cols = ["state", "county", "crop", "year"]
+    if "checkpoint" in panel.columns:
+        sort_cols.append("checkpoint")
+    panel = panel.sort_values(sort_cols).reset_index(drop=True)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     panel.to_csv(output_path, index=False)

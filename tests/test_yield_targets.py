@@ -191,8 +191,8 @@ class TestRiskClass:
         df = add_yield_anomaly(df)
         df = df.dropna(subset=["yield_anomaly"])
         df = add_risk_class(df, quantile=0.20)
-        valid = df.dropna(subset=["severe_risk"])
-        assert set(valid["severe_risk"].unique()).issubset({0, 1})
+        valid = df.dropna(subset=["severe_risk_descriptive"])
+        assert set(valid["severe_risk_descriptive"].unique()).issubset({0, 1})
 
     def test_risk_class_no_nan_for_valid_rows(self, two_county_df):
         df = clean_yield_dataframe(two_county_df)
@@ -200,8 +200,7 @@ class TestRiskClass:
         df = add_yield_anomaly(df)
         df = df.dropna(subset=["yield_anomaly"])
         df = add_risk_class(df, quantile=0.20)
-        # After dropping NaN anomaly rows, severe_risk should have no NaN
-        assert df["severe_risk"].isna().sum() == 0
+        assert df["severe_risk_descriptive"].isna().sum() == 0
 
     def test_risk_class_respects_quantile(self, two_county_df):
         df = clean_yield_dataframe(two_county_df)
@@ -210,7 +209,7 @@ class TestRiskClass:
         df = df.dropna(subset=["yield_anomaly"])
         quantile = 0.20
         df = add_risk_class(df, quantile=quantile)
-        actual_rate = df["severe_risk"].mean()
+        actual_rate = df["severe_risk_descriptive"].mean()
         # Allow ±10% tolerance due to discrete data and per-county computation
         assert abs(actual_rate - quantile) < 0.10, (
             f"Expected ~{quantile:.0%} severe risk rate, got {actual_rate:.2%}"

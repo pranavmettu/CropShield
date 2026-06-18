@@ -31,6 +31,8 @@ import requests
 from dotenv import load_dotenv
 import os
 
+from cropshield.data.fips_utils import build_county_fips_from_components
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -304,18 +306,11 @@ def clean_nass_response(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     # ── Build 5-digit county FIPS ─────────────────────────────────────────────
-    # state_fips is 2 digits; county_ansi is 3 digits
+    # Handles float-like components from CSV round-trips (e.g. 19.0, 169.0).
     if "state_fips" in df.columns and "county_ansi" in df.columns:
-        df["county_fips"] = (
-            df["state_fips"].astype(str).str.zfill(2)
-            + df["county_ansi"].astype(str).str.zfill(3)
+        df["county_fips"] = build_county_fips_from_components(
+            df["state_fips"], df["county_ansi"]
         )
-        # Mark rows where either component is missing/non-numeric
-        df.loc[
-            df["state_fips"].astype(str).str.strip().isin(["", "nan"])
-            | df["county_ansi"].astype(str).str.strip().isin(["", "nan"]),
-            "county_fips",
-        ] = pd.NA
     else:
         logger.warning("state_fips_code / county_ansi not found; county_fips will be missing.")
         df["county_fips"] = pd.NA

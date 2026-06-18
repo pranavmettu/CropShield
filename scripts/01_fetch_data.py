@@ -42,7 +42,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Fetch CropShield raw data from USDA NASS, NASA POWER, and Drought Monitor."
     )
-    parser.add_argument("--crop", default="CORN", help="NASS commodity (default: CORN)")
+    parser.add_argument(
+        "--crops",
+        nargs="+",
+        default=["CORN", "SOYBEANS"],
+        help="NASS commodities to fetch (default: CORN SOYBEANS)",
+    )
+    # Legacy single-crop flag kept for backward compatibility; overridden by --crops
+    parser.add_argument("--crop", default=None, help="NASS commodity (deprecated; use --crops)")
     parser.add_argument(
         "--states",
         nargs="+",
@@ -59,35 +66,41 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # Resolve crops list (--crop is deprecated; --crops takes priority)
+    crops = [c.upper() for c in (args.crops or ([args.crop] if args.crop else ["CORN", "SOYBEANS"]))]
+
     logger.info("=== CropShield: Step 1 — Fetch Data ===")
     logger.info(
-        "Crop: %s | States: %s | Years: %d–%s",
-        args.crop, args.states, args.start_year, args.end_year or "latest",
+        "Crops: %s | States: %s | Years: %d–%s",
+        crops, args.states, args.start_year, args.end_year or "latest",
     )
 
     # ── 1. USDA NASS yield ───────────────────────────────────────────────────
     logger.info("--- Fetching USDA NASS yield data ---")
+    import pandas as _pd
+    from pathlib import Path as _Path
+    nass_frames = []
     try:
-        df_nass = fetch_nass_yield(
-            crop=args.crop,
-            states=args.states,
-            start_year=args.start_year,
-            end_year=args.end_year,
-        )
-        logger.info(
-            "NASS fetch complete: %d rows | %d counties | years %d–%d",
-            len(df_nass),
-            df_nass["county_fips"].nunique(),
-            int(df_nass["year"].min()),
-            int(df_nass["year"].max()),
-        )
-        # Quick sanity print
-        print("\nSample NASS records:")
-        print(df_nass.head(10).to_string(index=False))
-        print(f"\nShape: {df_nass.shape}")
-        print(f"States: {sorted(df_nass['state'].unique())}")
-        print(f"Years:  {sorted(df_nass['year'].unique())}")
-        print(f"Mean yield: {df_nass['value'].mean():.1f} bu/acre\n")
+        for crop in crops:
+            crop_slug = crop.lower().replace(" ", "_")
+            logger.info("  Fetching %s …", crop)
+            df_crop = fetch_nass_yield(
+                crop=crop,
+                states=args.states,
+                start_year=args.start_year,
+                end_year=args.end_year,
+                output_raw=f"data/raw/nass_yield_{crop_slug}.csv",
+                output_clean=f"data/interim/nass_yield_{crop_slug}_clean.csv",
+            )
+            logger.info(
+                "  %s: %d rows | %d counties | years %d–%d",
+                crop,
+                len(df_crop),
+                df_crop["county_fips"].nunique(),
+                int(df_crop["year"].min()),
+                int(df_crop["year"].max()),
+            )
+            nass_frames.append(df_crop)
     except EnvironmentError as exc:
         logger.error("NASS API key missing: %s", exc)
         sys.exit(1)
@@ -95,11 +108,34 @@ def main() -> None:
         logger.error("NASS fetch failed: %s", exc, exc_info=True)
         sys.exit(1)
 
+    df_nass = _pd.concat(nass_frames, ignore_index=True) if nass_frames else _pd.DataFrame()
+
+    # Save combined multi-crop clean file (used by 02_build_features.py)
+    combined_clean = _Path("data/interim/nass_yield_clean.csv")
+    combined_clean.parent.mkdir(parents=True, exist_ok=True)
+    df_nass.to_csv(combined_clean, index=False)
+    logger.info("Combined NASS file saved → %s  (%d rows)", combined_clean, len(df_nass))
+
+    logger.info(
+        "NASS fetch complete: %d rows | %d counties | crops: %s",
+        len(df_nass),
+        df_nass["county_fips"].nunique(),
+        sorted(df_nass["crop"].unique()) if "crop" in df_nass.columns else crops,
+    )
+    print("\nSample NASS records:")
+    print(df_nass.head(10).to_string(index=False))
+    print(f"\nShape: {df_nass.shape}")
+    if "crop" in df_nass.columns:
+        for c in sorted(df_nass["crop"].unique()):
+            sub = df_nass[df_nass["crop"] == c]
+            print(f"  {c}: {len(sub)} rows | mean yield {sub['value'].mean():.1f} bu/acre")
+    print()
+
     # ── 2. NASA POWER weather ────────────────────────────────────────────────
     if not args.skip_weather:
         logger.info("--- Fetching NASA POWER weather data ---")
         try:
-            # Get the county FIPS codes present in the NASS data
+            # Union of county FIPS across all crops (weather is crop-independent)
             county_fips_list = df_nass["county_fips"].dropna().unique().tolist()
             logger.info("Loading centroids for %d counties…", len(county_fips_list))
             centroids = load_county_centroids(county_fips_list=county_fips_list)

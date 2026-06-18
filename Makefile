@@ -1,4 +1,4 @@
-.PHONY: install fetch-data build-features train evaluate app test clean lint
+.PHONY: install fetch-data build-features train train-baselines evaluate app test clean lint
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 PYTHON ?= python3
@@ -22,6 +22,9 @@ build-features:
 # ── Modeling ──────────────────────────────────────────────────────────────────
 train:
 	$(PYTHON) scripts/03_train_model.py
+
+train-baselines:
+	$(PYTHON) scripts/03_train_baselines.py
 
 evaluate:
 	$(PYTHON) scripts/04_evaluate_model.py

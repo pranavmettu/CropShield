@@ -125,8 +125,8 @@ def get_feature_columns(panel: pd.DataFrame) -> list[str]:
         "unit",
         # Targets
         "actual_yield", "expected_yield",
-        "yield_anomaly", "yield_anomaly_pct", "severe_risk",
+        "yield_anomaly", "yield_anomaly_pct", "severe_risk", "severe_risk_descriptive",
         # Diagnostics
-        "obs_days",
+        "obs_days", "is_partial_year", "checkpoint",
     }
     return [c for c in panel.columns if c not in non_features]

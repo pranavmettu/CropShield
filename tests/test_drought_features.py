@@ -1,21 +1,5 @@
 """
 Drought feature logic tests for CropShield.
-
-The Drought Monitor fetcher and feature engineering are not yet implemented
-(fetch_drought_monitor raises NotImplementedError), but the data contracts
-and feature logic can be tested with synthetic data matching the expected
-schema.
-
-Tests cover:
-  1. Drought category ordering: D0 < D1 < D2 < D3 < D4 (severity increases).
-  2. D2_plus aggregation: D2 + D3 + D4 only.
-  3. Date-cutoff leakage: drought features computed through a cutoff date
-     must not incorporate drought observations after that date.
-  4. FIPS normalisation in drought data.
-  5. clean_drought_dataframe contract (once implemented).
-
-Since fetch_drought_monitor is not yet implemented, tests that require it
-are marked xfail with a clear message.
 """
 
 from __future__ import annotations
@@ -23,9 +7,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-# The fetcher is not yet implemented — we test the data contract and helpers
-# that are defined (or should be defined) in the module.
-from cropshield.data.fetch_drought_monitor import DROUGHT_CATEGORIES
+from cropshield.data.fetch_drought_monitor import DROUGHT_CATEGORIES, clean_drought_dataframe
+from cropshield.features.drought_features import compute_drought_features
 
 
 # ── Constants and contracts ───────────────────────────────────────────────────
@@ -183,21 +166,64 @@ class TestDroughtDateCutoffLeakage:
         )
 
 
-# ── fetch_drought_monitor not yet implemented ─────────────────────────────────
+# ── compute_drought_features (implemented) ────────────────────────────────────
 
-class TestFetchDroughtMonitorNotImplemented:
+class TestComputeDroughtFeatures:
+    def test_required_columns_present(self):
+        weekly = _make_drought_df(
+            dates=["2020-04-07", "2020-04-14", "2020-05-05", "2020-06-02"],
+            d2=10.0, d3=5.0, d4=2.0,
+        )
+        weekly["year"] = 2020
+        features = compute_drought_features(weekly)
+        for col in (
+            "county_fips", "year", "weeks_d0", "weeks_d1", "weeks_d2",
+            "weeks_d3", "weeks_d4", "weeks_d2_plus",
+            "max_drought_category", "mean_drought_severity", "checkpoint",
+        ):
+            assert col in features.columns, f"Missing column {col}"
+
+    def test_weeks_d2_plus_counts_severe_weeks(self):
+        weekly = pd.DataFrame({
+            "date": pd.to_datetime(["2020-04-07", "2020-04-14", "2020-05-05"]),
+            "county_fips": "19001",
+            "year": 2020,
+            "D0": [0, 0, 0],
+            "D1": [0, 0, 0],
+            "D2": [10, 0, 0],
+            "D3": [0, 5, 0],
+            "D4": [0, 0, 0],
+        })
+        features = compute_drought_features(weekly)
+        assert features["weeks_d2_plus"].iloc[0] == 2  # weeks 1 and 2
+
+    def test_cutoff_excludes_later_drought(self):
+        april = _make_drought_df(dates=["2020-04-07"], d2=10.0, d3=0.0, d4=0.0)
+        july  = _make_drought_df(dates=["2020-07-07"], d2=0.0, d3=0.0, d4=99.0)
+        full = pd.concat([april, july], ignore_index=True)
+        full["year"] = 2020
+        feat = compute_drought_features(full, cutoff_date="2020-06-30")
+        assert feat["max_drought_category"].iloc[0] == 2
+        assert feat["checkpoint"].iloc[0] == "2020-06-30"
+
+    def test_clean_drought_normalises_fips(self):
+        raw = pd.DataFrame({
+            "date": ["2020-04-07"],
+            "county_fips": [19001.0],
+            "D0": [10], "D1": [0], "D2": [0], "D3": [0], "D4": [0],
+        })
+        clean = clean_drought_dataframe(raw)
+        assert clean["county_fips"].iloc[0] == "19001"
+
+
+class TestFetchDroughtMonitorLiveApi:
     @pytest.mark.xfail(
         strict=True,
-        reason="fetch_drought_monitor is not yet implemented (Prompt 6+)",
+        reason="Live Drought Monitor API fetch not implemented — use raw CSV on disk",
     )
-    def test_fetch_raises_not_implemented(self):
+    def test_fetch_raises_without_raw_file(self, tmp_path):
         from cropshield.data.fetch_drought_monitor import fetch_drought_monitor
-        fetch_drought_monitor(state_fips_list=["19"])
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason="clean_drought_dataframe is not yet implemented (Prompt 6+)",
-    )
-    def test_clean_raises_not_implemented(self):
-        from cropshield.data.fetch_drought_monitor import clean_drought_dataframe
-        clean_drought_dataframe(pd.DataFrame())
+        fetch_drought_monitor(
+            state_fips_list=["19"],
+            output_raw=tmp_path / "missing.csv",
+        )

@@ -280,34 +280,29 @@ def add_yield_anomaly(df: pd.DataFrame) -> pd.DataFrame:
 def add_risk_class(
     df: pd.DataFrame,
     quantile: float = 0.20,
+    label_col: str = "severe_risk_descriptive",
 ) -> pd.DataFrame:
-    """Add a severe yield-risk binary label.
+    """Add a **descriptive** severe yield-risk label for EDA only — not for modeling.
 
-    A county-crop-year is labelled severe risk (``severe_risk = 1``) when its
-    ``yield_anomaly_pct`` falls at or below the ``quantile``-th percentile of
-    the anomaly distribution for that county-crop group in the provided
-    DataFrame.
+    Computes per-county-crop quantile thresholds from **all rows in ``df``**.
+    This leaks information across time if used for train/test evaluation.
 
-    Important
-    ---------
-    The quantile thresholds are computed from the rows present in ``df``.
-    To avoid leakage into model evaluation, callers should pass only training
-    data when computing thresholds, then apply those thresholds separately to
-    the test set. A helper ``compute_risk_thresholds`` is provided for this.
+    For model training, use ``assign_modeling_risk_labels()`` instead, which
+    computes thresholds on the training split only.
 
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame with a ``yield_anomaly_pct`` column (NaN rows are ignored
-        when computing thresholds but kept in the output as NaN severe_risk).
+        DataFrame with a ``yield_anomaly_pct`` column.
     quantile : float
         Fraction defining "severe" risk (e.g. 0.20 = bottom 20th percentile).
+    label_col : str
+        Name of the descriptive label column (default: ``severe_risk_descriptive``).
 
     Returns
     -------
     pd.DataFrame
-        Input DataFrame with an added ``severe_risk`` integer column (0 or 1).
-        Rows where ``yield_anomaly_pct`` is NaN receive NaN severe_risk.
+        Input DataFrame with an added descriptive risk column.
     """
     if "yield_anomaly_pct" not in df.columns:
         raise KeyError(
@@ -317,23 +312,21 @@ def add_risk_class(
 
     df = df.copy()
 
-    # Compute per-county-crop quantile threshold using only non-NaN values
     threshold = df.groupby(GROUP_KEYS, group_keys=False)["yield_anomaly_pct"].transform(
         lambda s: s.quantile(quantile)
     )
 
-    # Label: 1 if anomaly is at or below threshold, NaN if anomaly is NaN
-    df["severe_risk"] = np.where(
+    df[label_col] = np.where(
         df["yield_anomaly_pct"].notna(),
         (df["yield_anomaly_pct"] <= threshold).astype(int),
         float("nan"),
     )
-    df["severe_risk"] = pd.to_numeric(df["severe_risk"], errors="coerce")
+    df[label_col] = pd.to_numeric(df[label_col], errors="coerce")
 
-    n_risk = int((df["severe_risk"] == 1).sum())
-    n_total = int(df["severe_risk"].notna().sum())
+    n_risk = int((df[label_col] == 1).sum())
+    n_total = int(df[label_col].notna().sum())
     logger.info(
-        "add_risk_class (quantile=%.2f): %d severe-risk rows / %d total (%.1f%%)",
+        "add_risk_class (descriptive, quantile=%.2f): %d severe-risk rows / %d total (%.1f%%)",
         quantile, n_risk, n_total, 100 * n_risk / n_total if n_total else 0,
     )
     return df
@@ -403,6 +396,48 @@ def apply_risk_thresholds(
     return df
 
 
+def assign_modeling_risk_labels(
+    train_df: pd.DataFrame,
+    *other_dfs: pd.DataFrame,
+    quantile: float = 0.20,
+    label_col: str = "severe_risk",
+) -> tuple[pd.DataFrame, ...]:
+    """Assign modeling-safe risk labels using training-data thresholds only.
+
+    Thresholds are computed exclusively from ``train_df``.  All other
+    DataFrames receive labels via ``apply_risk_thresholds`` without
+    recomputing quantiles — preventing test-year anomalies from influencing
+    the decision boundary.
+
+    Parameters
+    ----------
+    train_df : pd.DataFrame
+        Training split with ``yield_anomaly_pct``.
+    *other_dfs : pd.DataFrame
+        Validation / test splits to label with the same thresholds.
+    quantile : float
+        Bottom quantile defining severe risk.
+    label_col : str
+        Output column name (default ``severe_risk``).
+
+    Returns
+    -------
+    tuple[pd.DataFrame, ...]
+        ``(train_labeled, *others_labeled)`` — same order as inputs.
+    """
+    thresholds = compute_risk_thresholds(train_df, quantile=quantile)
+    train_out = apply_risk_thresholds(train_df, thresholds)
+    if label_col != "severe_risk":
+        train_out = train_out.rename(columns={"severe_risk": label_col})
+    others_out = []
+    for df in other_dfs:
+        labeled = apply_risk_thresholds(df, thresholds)
+        if label_col != "severe_risk":
+            labeled = labeled.rename(columns={"severe_risk": label_col})
+        others_out.append(labeled)
+    return (train_out, *others_out)
+
+
 def build_yield_targets(
     nass_df: pd.DataFrame,
     method: str = "rolling",
@@ -410,6 +445,7 @@ def build_yield_targets(
     min_periods: int = 3,
     min_years: int = 5,
     risk_quantile: float = 0.20,
+    add_descriptive_risk: bool = False,
     output_path: str | None = "data/interim/yield_targets.csv",
 ) -> pd.DataFrame:
     """Run the full yield target engineering pipeline in one call.
@@ -430,16 +466,21 @@ def build_yield_targets(
     min_years : int
         Minimum prior years for trend fit (used when ``method="trend"``).
     risk_quantile : float
-        Quantile threshold for severe-risk labelling.
+        Quantile for descriptive risk labels (only when
+        ``add_descriptive_risk=True``).
+    add_descriptive_risk : bool
+        If ``True``, add ``severe_risk_descriptive`` using the full dataset.
+        **Not safe for model evaluation.**  For training, use
+        ``assign_modeling_risk_labels()`` after a temporal split.
     output_path : str, optional
         If provided, saves the result to this path.
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with all target columns added:
+        DataFrame with target columns:
         ``actual_yield``, ``expected_yield``, ``yield_anomaly``,
-        ``yield_anomaly_pct``, ``severe_risk``.
+        ``yield_anomaly_pct``, and optionally ``severe_risk_descriptive``.
     """
     df = clean_yield_dataframe(nass_df)
 
@@ -451,7 +492,8 @@ def build_yield_targets(
         raise ValueError(f"Unknown method '{method}'. Use 'rolling' or 'trend'.")
 
     df = add_yield_anomaly(df)
-    df = add_risk_class(df, quantile=risk_quantile)
+    if add_descriptive_risk:
+        df = add_risk_class(df, quantile=risk_quantile)
 
     if output_path:
         from pathlib import Path

@@ -33,7 +33,7 @@ from cropshield.data.build_county_panel import (
 # Minimum required columns in the final modeling panel
 REQUIRED_PANEL_COLUMNS = {
     "year", "state", "county", "county_fips", "crop",
-    "actual_yield", "expected_yield", "yield_anomaly", "yield_anomaly_pct", "severe_risk",
+    "actual_yield", "expected_yield", "yield_anomaly", "yield_anomaly_pct",
 }
 
 
@@ -54,7 +54,7 @@ def _make_yield_targets(n_counties: int = 3, n_years: int = 4) -> pd.DataFrame:
                 "expected_yield": 180.0 + i if yr > 2018 else None,
                 "yield_anomaly": 5.0 if yr > 2018 else None,
                 "yield_anomaly_pct": 2.5 if yr > 2018 else None,
-                "severe_risk": 0 if yr > 2018 else None,
+                "severe_risk_descriptive": 0 if yr > 2018 else None,
             })
     return pd.DataFrame(rows)
 
@@ -212,7 +212,7 @@ class TestPanelFipsNormalization:
                 "expected_yield":  [180.0, 187.0],
                 "yield_anomaly":   [5.0, 3.0],
                 "yield_anomaly_pct": [2.5, 1.6],
-                "severe_risk":     [0, 0],
+                "severe_risk_descriptive": [0, 0],
             })
             weather = pd.DataFrame({
                 "county_fips": ["19169", "17001"],    # strings

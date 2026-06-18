@@ -65,26 +65,42 @@ def classification_metrics(
 ) -> dict[str, float]:
     """Compute binary classification metrics for severe-risk prediction.
 
-    Parameters
-    ----------
-    y_true : array-like
-        Ground-truth binary labels (0/1).
-    y_pred : array-like
-        Predicted binary labels.
-    y_prob : array-like, optional
-        Predicted probabilities for the positive class. Required for AUROC.
-    model_name : str
-        Label for logging.
-
     Returns
     -------
     dict
-        Dictionary with keys: ``precision``, ``recall``, ``f1``,
-        and optionally ``auroc``.
+        Keys: ``accuracy``, ``precision``, ``recall``, ``f1``,
+        ``tn``, ``fp``, ``fn``, ``tp``.
     """
-    # TODO: Implement using sklearn.metrics.precision_recall_fscore_support
-    # and roc_auc_score if y_prob is provided
-    raise NotImplementedError("classification_metrics is not yet implemented.")
+    from sklearn.metrics import (
+        accuracy_score,
+        confusion_matrix,
+        precision_recall_fscore_support,
+    )
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="binary", zero_division=0,
+    )
+    acc = float(accuracy_score(y_true, y_pred))
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+
+    results = {
+        "accuracy": acc,
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
+    }
+    logger.info(
+        "%s — acc: %.3f  precision: %.3f  recall: %.3f  F1: %.3f",
+        model_name, acc, precision, recall, f1,
+    )
+    return results
 
 
 def save_metrics(
