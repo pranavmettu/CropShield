@@ -39,6 +39,7 @@ import numpy as np
 
 from cropshield.data.fips_utils import load_nass_yield_csv, normalise_fips_series
 from cropshield.features.panel_features import add_year_index, add_heat_stress_features
+from cropshield.features.lag_features import build_lag_features_table, LAG_FEATURE_COLUMNS
 from cropshield.features.weather_features import (
     FULL_GROWING_SEASON_DAYS,
     filter_incomplete_current_year,
@@ -76,6 +77,7 @@ def build_modeling_panel(
     drop_missing_target: bool = True,
     allow_partial_year: bool = False,
     current_year: int | None = None,
+    add_lag_features: bool = True,
 ) -> pd.DataFrame:
     """Merge all feature sources into the county-crop-year modeling panel.
 
@@ -134,6 +136,20 @@ def build_modeling_panel(
             n_dropped_fips,
         )
     logger.info("Loaded yield targets: %d rows", len(yields))
+
+    # ── 1b. Leakage-safe lagged yield features (county-crop-year) ─────────────
+    # Computed on the full yield history (incl. early years with NaN target) so
+    # rolling windows stay continuous, then merged by (county_fips, crop, year).
+    if add_lag_features and {"actual_yield", "yield_anomaly"}.issubset(yields.columns):
+        lag_table = build_lag_features_table(yields)
+        before = len(yields)
+        yields = yields.merge(lag_table, on=["county_fips", "crop", "year"], how="left")
+        if len(yields) != before:
+            raise ValueError(
+                f"Lag-feature merge changed row count {before} → {len(yields)}; "
+                "lag table is not unique by (county_fips, crop, year)."
+            )
+        logger.info("Merged %d lagged yield features.", len(LAG_FEATURE_COLUMNS))
 
     # ── 2. Load weather features ─────────────────────────────────────────────
     weather_path = Path(weather_path)
@@ -203,8 +219,20 @@ def build_modeling_panel(
             drought["county_fips"] = _normalise_fips(drought["county_fips"])
             drought["year"] = pd.to_numeric(drought["year"], errors="coerce").astype("Int64")
             validate_merge_keys(drought, "drought features", keys=WEATHER_MERGE_KEYS)
-            panel = panel.merge(drought, on=WEATHER_MERGE_KEYS, how="left")
-            logger.info("After drought merge: %d rows", len(panel))
+            # Merge on checkpoint too when both sides carry it, so drought rows
+            # do not fan out the panel across checkpoints.
+            drought_keys = list(WEATHER_MERGE_KEYS)
+            if "checkpoint" in drought.columns and "checkpoint" in panel.columns:
+                drought_keys = drought_keys + ["checkpoint"]
+            drought = drought.drop_duplicates(subset=drought_keys, keep="first")
+            before = len(panel)
+            panel = panel.merge(drought, on=drought_keys, how="left")
+            if len(panel) != before:
+                raise ValueError(
+                    f"Drought merge fanned out rows {before} → {len(panel)}; "
+                    f"drought not unique by {drought_keys}."
+                )
+            logger.info("After drought merge (keys=%s): %d rows", drought_keys, len(panel))
         else:
             logger.warning("Drought path provided but file not found: %s", drought_path)
 

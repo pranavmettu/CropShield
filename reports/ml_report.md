@@ -1,6 +1,6 @@
 # CropShield ML Model Report
 
-Generated: 2026-06-17 22:34
+Generated: 2026-06-17 22:49
 
 ## Setup
 
@@ -8,7 +8,7 @@ Generated: 2026-06-17 22:34
 - Test rows: 4,450 (years 2023–2025)
 - Crops: CORN, SOYBEANS
 - Checkpoints: august_31, full_season, july_31, june_30, may_31
-- Numeric features (12): expected_yield, cumulative_precip, mean_temp, max_temp, extreme_heat_days, dry_days, longest_dry_spell, growing_degree_days, obs_days, precip_anomaly, heat_dry_stress, heat_dry_spell
+- Numeric features (29): expected_yield, prior_year_yield_anomaly, prior_year_yield, rolling_3yr_mean_yield_anomaly, rolling_3yr_std_yield_anomaly, rolling_3yr_mean_yield, rolling_3yr_std_yield, cumulative_precip, mean_temp, max_temp, extreme_heat_days, dry_days, longest_dry_spell, growing_degree_days, obs_days, precip_anomaly, max_consecutive_dry_days, extreme_heat_days_after_july_1, precip_last_30_days_before_checkpoint, heat_days_last_30_days_before_checkpoint, gdd_last_30_days_before_checkpoint, precip_anomaly_from_county_checkpoint_mean, gdd_anomaly_from_county_checkpoint_mean, heat_days_anomaly_from_county_checkpoint_mean, dry_days_anomaly_from_county_checkpoint_mean, temp_mean_anomaly_from_county_checkpoint_mean, precip_pct_of_county_checkpoint_mean, heat_dry_stress, heat_dry_spell
 - Categorical features (3): crop, checkpoint, state
 - include_county=False, include_year_index=False
 
@@ -16,44 +16,44 @@ Generated: 2026-06-17 22:34
 
 | Model | RMSE | MAE | R² |
 |-------|------|-----|-----|
-| ridge | 15.230 | 11.725 | -0.516 |
-| hist_gradient_boosting_reg | 15.438 | 10.969 | -0.557 |
-| random_forest_reg | 15.699 | 10.991 | -0.610 |
+| random_forest_reg | 14.635 | 10.272 | -0.399 |
+| ridge | 15.495 | 11.812 | -0.569 |
+| hist_gradient_boosting_reg | 15.966 | 11.369 | -0.666 |
 
 ## Regression — by checkpoint (best model)
 
 | Checkpoint | RMSE | MAE | R² |
 |-----------|------|-----|-----|
-| august_31 | 15.400 | 12.013 | -0.550 |
-| full_season | 15.400 | 12.013 | -0.550 |
-| july_31 | 15.956 | 12.506 | -0.664 |
-| june_30 | 14.741 | 11.231 | -0.420 |
-| may_31 | 14.613 | 10.862 | -0.395 |
+| august_31 | 14.710 | 10.314 | -0.414 |
+| full_season | 14.710 | 10.313 | -0.414 |
+| july_31 | 15.035 | 10.555 | -0.477 |
+| june_30 | 13.649 | 9.549 | -0.217 |
+| may_31 | 15.024 | 10.628 | -0.475 |
 
 ## Regression — by crop (best model)
 
 | Crop | RMSE | MAE | R² |
 |------|------|-----|-----|
-| CORN | 19.695 | 16.235 | -0.589 |
-| SOYBEANS | 8.252 | 6.986 | -1.833 |
+| CORN | 19.843 | 16.247 | -0.613 |
+| SOYBEANS | 5.052 | 3.994 | -0.062 |
 
 ## Classification — overall (sorted by F1)
 
 | Model | F1 | Accuracy | Precision | Recall |
 |-------|-----|----------|-----------|--------|
-| logistic_regression | 0.266 | 0.601 | 0.212 | 0.357 |
-| random_forest_clf | 0.266 | 0.796 | 0.494 | 0.182 |
+| logistic_regression | 0.377 | 0.649 | 0.295 | 0.524 |
+| random_forest_clf | 0.100 | 0.798 | 0.510 | 0.056 |
 
 ## Baseline comparison
 
-- **Best ML regression**: `ridge` RMSE=15.230, R²=-0.516
-- Best baseline (`crop_checkpoint_mean`) RMSE=12.988 → ML does NOT beat the baseline (15.230 vs 12.988)
-- **Best ML classifier**: `logistic_regression` F1=0.266, recall=0.357
+- **Best ML regression**: `random_forest_reg` RMSE=14.635, R²=-0.399
+- Best baseline (`crop_checkpoint_mean`) RMSE=12.988 → ML does NOT beat the baseline (14.635 vs 12.988)
+- **Best ML classifier**: `logistic_regression` F1=0.377, recall=0.524
 - Baseline (`historical_county_risk`) F1=0.124, recall=0.072 → ML **beats** F1 and **beats** recall
 
 ## Checkpoint trend (does later = better?)
 
-- For `ridge`, RMSE does NOT clearly improve from may_31 (14.613) to full_season (15.400).
+- For `random_forest_reg`, RMSE improves from may_31 (15.024) to full_season (14.710).
 
 ## Leakage check
 

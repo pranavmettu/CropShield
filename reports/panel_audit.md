@@ -10,7 +10,10 @@
 
 ## Missingness (%)
 
-- No missing values.
+- `extreme_heat_days_after_july_1`: 40.0%
+- `rolling_3yr_std_yield_anomaly`: 30.51%
+- `prior_year_yield_anomaly`: 15.28%
+- `rolling_3yr_mean_yield_anomaly`: 15.28%
 
 ## Target distribution by crop
 

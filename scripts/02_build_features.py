@@ -31,13 +31,17 @@ from cropshield.features.yield_targets import build_yield_targets
 from cropshield.features.weather_features import (
     compute_weather_features,
     compute_multi_checkpoint_weather_features,
+    compute_checkpoint_stress_features,
     save_weather_features,
     filter_incomplete_current_year,
     CHECKPOINT_CONFIGS,
+    STRESS_FEATURE_COLUMNS,
 )
+from cropshield.features.weather_anomalies import add_weather_anomalies, weather_anomaly_columns
 from cropshield.data.build_county_panel import build_modeling_panel
 from cropshield.data.fips_utils import load_nass_yield_csv
 from cropshield.features.panel_features import get_feature_columns
+from cropshield.evaluation.panel_audit import save_panel_audit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -141,6 +145,22 @@ def main() -> None:
                 daily_df, checkpoints=checkpoints
             )
 
+            # ── Stress-timing features from daily weather (leakage-safe) ──────
+            logger.info("Computing checkpoint stress-timing features from daily weather")
+            stress = compute_checkpoint_stress_features(daily_df, checkpoints=checkpoints)
+            merge_keys = ["county_fips", "state_fips", "year", "checkpoint"]
+            merge_keys = [k for k in merge_keys if k in weather_features.columns and k in stress.columns]
+            before = len(weather_features)
+            weather_features = weather_features.merge(stress, on=merge_keys, how="left")
+            assert len(weather_features) == before, "stress merge fanned out weather rows"
+            logger.info("Merged %d stress-timing features", len(STRESS_FEATURE_COLUMNS))
+
+            # ── County+checkpoint-normalised weather anomalies (leakage-safe) ─
+            weather_features = add_weather_anomalies(weather_features)
+            logger.info(
+                "Added %d weather-anomaly features", len(weather_anomaly_columns(weather_features))
+            )
+
         weather_features = filter_incomplete_current_year(
             weather_features,
             allow_partial_year=args.allow_partial_year,
@@ -164,20 +184,47 @@ def main() -> None:
         logger.info("=== Step 2 complete (targets only — no weather data) ===")
         return
 
-    # ── 3. Drought features (placeholder) ─────────────────────────────────────
-    logger.info("--- Drought Monitor features not yet implemented ---")
+    # ── 3. Drought features (only if raw data is present) ─────────────────────
+    drought_raw_path = Path("data/raw/drought_monitor.csv")
+    drought_features_path = None
+    if drought_raw_path.exists():
+        logger.info("--- Computing drought features from %s ---", drought_raw_path)
+        from cropshield.data.fetch_drought_monitor import clean_drought_dataframe
+        from cropshield.features.drought_features import compute_drought_features
+
+        drought_raw = pd.read_csv(drought_raw_path)
+        drought_clean = clean_drought_dataframe(drought_raw)
+        # Full-season drought features merged by (county_fips, year); broadcast
+        # across checkpoints. (Per-checkpoint drought cutoffs are a future step
+        # once raw weekly data and per-year cutoff support are wired in.)
+        drought_feats = compute_drought_features(drought_clean)
+        drought_feats = drought_feats.drop(columns=[c for c in ("checkpoint",) if c in drought_feats.columns])
+        drought_features_path = Path("data/interim/drought_features.csv")
+        drought_feats.to_csv(drought_features_path, index=False)
+        logger.info("Drought features saved → %s (%d rows)", drought_features_path, len(drought_feats))
+    else:
+        logger.warning(
+            "No raw drought data at %s — drought feature code exists "
+            "(fetch_drought_monitor.clean_drought_dataframe + "
+            "drought_features.compute_drought_features) but is SKIPPED. "
+            "Drought columns will be absent from the panel.",
+            drought_raw_path,
+        )
 
     # ── 4. Build modeling panel ───────────────────────────────────────────────
     logger.info("--- Assembling modeling panel ---")
     panel = build_modeling_panel(
         yield_path="data/interim/yield_targets.csv",
         weather_path=str(weather_features_path),
-        drought_path=None,
+        drought_path=str(drought_features_path) if drought_features_path else None,
         output_path="data/processed/modeling_panel.csv",
         missingness_path="reports/missingness_report.csv",
         drop_missing_target=True,
         allow_partial_year=args.allow_partial_year,
     )
+
+    # Save panel audit
+    save_panel_audit(panel, "reports/panel_audit.md")
 
     feature_cols = get_feature_columns(panel)
     print("\n── Modeling Panel Summary ────────────────────────────────────")

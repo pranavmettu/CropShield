@@ -403,6 +403,110 @@ def compute_multi_checkpoint_weather_features(
     return combined
 
 
+def _checkpoint_end_date(year: int, checkpoint: str) -> pd.Timestamp:
+    """Return the calendar cutoff date for a checkpoint in a given year."""
+    md = CHECKPOINT_CONFIGS.get(checkpoint)
+    if md is None:  # full_season → end of August
+        return pd.Timestamp(year=year, month=GROWING_SEASON_END_MONTH, day=31)
+    mm, dd = (int(x) for x in md.split("-"))
+    return pd.Timestamp(year=year, month=mm, day=dd)
+
+
+def compute_checkpoint_stress_features(
+    daily_df: pd.DataFrame,
+    checkpoints: list[str] | None = None,
+    group_cols: list[str] | None = None,
+    *,
+    last_n_days: int = 30,
+) -> pd.DataFrame:
+    """Compute stress-timing features per (county, year, checkpoint) from daily data.
+
+    All features respect the checkpoint cutoff — no weather after the checkpoint
+    date can influence the value, so they are leakage-safe for early-season
+    forecasting.
+
+    Features
+    --------
+    max_consecutive_dry_days
+        Longest dry-day run within the season up to the checkpoint.
+    extreme_heat_days_after_july_1
+        Heat-stress days on/after July 1 (NaN for may_31 / june_30 where July
+        has not occurred yet — undefined, imputed later).
+    precip_last_30_days_before_checkpoint
+        Precipitation total in the ``last_n_days`` ending at the checkpoint date.
+    heat_days_last_30_days_before_checkpoint
+        Heat-stress days in the trailing window.
+    gdd_last_30_days_before_checkpoint
+        Growing-degree days in the trailing window.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per ``(county_fips, state_fips, year, checkpoint)``.
+    """
+    ckpts = checkpoints or list(CHECKPOINT_CONFIGS.keys())
+    grp_cols = group_cols or GROUP_COLS
+    daily = daily_df.copy()
+    daily["date"] = pd.to_datetime(daily["date"])
+
+    frames: list[pd.DataFrame] = []
+    for name in ckpts:
+        if name not in CHECKPOINT_CONFIGS:
+            raise ValueError(f"Unknown checkpoint {name!r}")
+        month_day = CHECKPOINT_CONFIGS[name]
+        season = filter_growing_season(daily, cutoff_month_day=month_day)
+
+        records = []
+        for keys, g in season.groupby(grp_cols, sort=True):
+            key_dict = dict(zip(grp_cols, keys if isinstance(keys, tuple) else (keys,)))
+            g = g.sort_values("date")
+            year = int(key_dict.get("year"))
+            precip = g["PRECTOTCORR"]
+            tmax = g["T2M_MAX"]
+            tavg = g["T2M"]
+
+            # Heat after July 1 — only defined once July has begun
+            if name in ("july_31", "august_31", "full_season"):
+                after_july = g[g["date"] >= pd.Timestamp(year=year, month=7, day=1)]
+                heat_after_july = float((after_july["T2M_MAX"] >= EXTREME_HEAT_THRESHOLD_C).sum())
+            else:
+                heat_after_july = np.nan
+
+            # Trailing window ending at the checkpoint date
+            end_date = _checkpoint_end_date(year, name)
+            window_start = end_date - pd.Timedelta(days=last_n_days - 1)
+            win = g[(g["date"] >= window_start) & (g["date"] <= end_date)]
+
+            records.append({
+                **key_dict,
+                "max_consecutive_dry_days": longest_dry_spell(precip),
+                "extreme_heat_days_after_july_1": heat_after_july,
+                "precip_last_30_days_before_checkpoint": float(win["PRECTOTCORR"].sum()),
+                "heat_days_last_30_days_before_checkpoint": float(
+                    (win["T2M_MAX"] >= EXTREME_HEAT_THRESHOLD_C).sum()
+                ),
+                "gdd_last_30_days_before_checkpoint": growing_degree_days(win["T2M"]),
+            })
+
+        cp = pd.DataFrame(records)
+        cp["checkpoint"] = name
+        frames.append(cp)
+        logger.info("Stress features checkpoint %s: %d rows", name, len(cp))
+
+    combined = pd.concat(frames, ignore_index=True)
+    logger.info("compute_checkpoint_stress_features: %d total rows", len(combined))
+    return combined
+
+
+STRESS_FEATURE_COLUMNS = [
+    "max_consecutive_dry_days",
+    "extreme_heat_days_after_july_1",
+    "precip_last_30_days_before_checkpoint",
+    "heat_days_last_30_days_before_checkpoint",
+    "gdd_last_30_days_before_checkpoint",
+]
+
+
 def filter_incomplete_current_year(
     features_df: pd.DataFrame,
     *,
